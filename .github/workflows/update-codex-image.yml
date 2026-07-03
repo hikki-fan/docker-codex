@@ -1,0 +1,159 @@
+name: Update Codex Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Force rebuild and push even if the Codex version did not change
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "0 3 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - .github/workflows/update-codex-image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: codex-dev
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get latest Codex version from npm
+        id: latest
+        run: |
+          LATEST_VERSION=$(npm view @openai/codex version)
+          LATEST_RELAY_VERSION=$(npm view codex-relay version)
+          echo "latest_version=${LATEST_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "latest_relay_version=${LATEST_RELAY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Latest Codex version: ${LATEST_VERSION}"
+          echo "Latest Codex Relay version: ${LATEST_RELAY_VERSION}"
+
+      - name: Get current Codex version from Docker image
+        id: current
+        continue-on-error: true
+        run: |
+          IMAGE="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+
+          echo "Pulling ${IMAGE}..."
+          if docker pull "${IMAGE}"; then
+            CURRENT_VERSION=$(docker run --rm "${IMAGE}" bash -lc "codex --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -n 1 || true")
+            CURRENT_RELAY_VERSION=$(docker run --rm "${IMAGE}" bash -lc "node -p \"require('/usr/local/lib/node_modules/codex-relay/package.json').version\" 2>/dev/null || true")
+          else
+            CURRENT_VERSION=""
+            CURRENT_RELAY_VERSION=""
+          fi
+
+          echo "current_version=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "current_relay_version=${CURRENT_RELAY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Current image Codex version: ${CURRENT_VERSION}"
+          echo "Current image Codex Relay version: ${CURRENT_RELAY_VERSION}"
+
+      - name: Decide whether to build
+        id: decision
+        run: |
+          LATEST="${{ steps.latest.outputs.latest_version }}"
+          LATEST_RELAY="${{ steps.latest.outputs.latest_relay_version }}"
+          CURRENT="${{ steps.current.outputs.current_version }}"
+          CURRENT_RELAY="${{ steps.current.outputs.current_relay_version }}"
+          EVENT="${{ github.event_name }}"
+          FORCE_BUILD="${{ inputs.force_build || false }}"
+
+          echo "Latest:  ${LATEST}"
+          echo "Current: ${CURRENT}"
+          echo "Latest relay:  ${LATEST_RELAY}"
+          echo "Current relay: ${CURRENT_RELAY}"
+          echo "Event:   ${EVENT}"
+          echo "Force:   ${FORCE_BUILD}"
+
+          if [ "${FORCE_BUILD}" = "true" ]; then
+            echo "Manual force build requested."
+            echo "reason=manual-force-build" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${CURRENT}" ]; then
+            echo "No existing image version found. Build required."
+            echo "reason=no-current-image" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${LATEST}" != "${CURRENT}" ]; then
+            echo "Version changed. Build required."
+            echo "reason=codex-version-changed" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${CURRENT_RELAY}" ]; then
+            echo "No existing Codex Relay version found. Build required."
+            echo "reason=no-current-relay-version" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${LATEST_RELAY}" != "${CURRENT_RELAY}" ]; then
+            echo "Codex Relay version changed. Build required."
+            echo "reason=codex-relay-version-changed" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${EVENT}" = "push" ]; then
+            echo "Build configuration changed. Build required."
+            echo "reason=build-config-changed" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged. Skip build."
+            echo "reason=codex-version-unchanged" >> "$GITHUB_OUTPUT"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push Docker image
+        if: steps.decision.outputs.should_build == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            CODEX_VERSION=${{ steps.latest.outputs.latest_version }}
+            CODEX_RELAY_VERSION=${{ steps.latest.outputs.latest_relay_version }}
+          tags: |
+            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}
+            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}-relay-${{ steps.latest.outputs.latest_relay_version }}
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
+            org.opencontainers.image.description=OpenAI Codex CLI development container
+            org.opencontainers.image.version=${{ steps.latest.outputs.latest_version }}
+            org.opencontainers.image.codex-relay.version=${{ steps.latest.outputs.latest_relay_version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## Codex Docker image update"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Latest Codex version | ${{ steps.latest.outputs.latest_version }} |"
+            echo "| Current image version | ${{ steps.current.outputs.current_version }} |"
+            echo "| Latest Codex Relay version | ${{ steps.latest.outputs.latest_relay_version }} |"
+            echo "| Current image Codex Relay version | ${{ steps.current.outputs.current_relay_version }} |"
+            echo "| Should build | ${{ steps.decision.outputs.should_build }} |"
+            echo "| Reason | ${{ steps.decision.outputs.reason }} |"
+            echo "| Image | ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

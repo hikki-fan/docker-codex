@@ -1,0 +1,20 @@
+services:
+  codex:
+    image: ${DOCKERHUB_USERNAME:-limairui}/codex-dev:latest
+    container_name: codex
+    restart: unless-stopped
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    ports:
+      - "8787:8787"
+    environment:
+      - TZ=Asia/Shanghai
+      - HOME=/home/codex
+      - HTTP_PROXY=${CODEX_HTTP_PROXY:-http://192.168.50.161:7897}
+      - HTTPS_PROXY=${CODEX_HTTPS_PROXY:-http://192.168.50.161:7897}
+      - NO_PROXY=${CODEX_NO_PROXY:-localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8}
+    volumes:
+      - /share/Docker/codex/home:/home/codex
+      - /share/Docker/codex/workspace:/workspace
+      - /share/Docker:/nas-docker
