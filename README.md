@@ -4,7 +4,7 @@ Build a personal Docker image for the OpenAI Codex CLI and Codex Relay, then pub
 
 The image installs pinned `@openai/codex` and `codex-relay` versions from npm. GitHub Actions checks the latest npm versions every day and only rebuilds the Docker image when Codex or Codex Relay has changed.
 
-It also includes common terminal tools and `bubblewrap` for sandbox support.
+It also includes common terminal tools and `bubblewrap` for sandbox support. The compose file grants the container the extra sandbox permissions bubblewrap needs inside Docker.
 
 ## Files
 
@@ -87,6 +87,30 @@ ports:
 ```
 
 This only opens the port mapping. A service still needs to listen on `8787` inside the container, such as a web terminal or code server.
+
+## Bubblewrap
+
+The image includes `bubblewrap`:
+
+```bash
+bwrap --version
+```
+
+Because bubblewrap creates Linux namespaces, Docker must grant extra permissions. The compose file includes:
+
+```yaml
+cap_add:
+  - SYS_ADMIN
+security_opt:
+  - seccomp=unconfined
+  - apparmor=unconfined
+```
+
+Without these options, `bwrap` may fail with:
+
+```text
+Creating new namespace failed: Operation not permitted
+```
 
 ## Manual Build
 
