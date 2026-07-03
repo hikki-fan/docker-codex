@@ -30,6 +30,8 @@ env:
 jobs:
   check-and-build:
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
     steps:
       - name: Checkout repository
@@ -41,7 +43,7 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v4
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Get latest Codex version from npm
@@ -58,7 +60,7 @@ jobs:
         id: current
         continue-on-error: true
         run: |
-          IMAGE="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+          IMAGE="${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
 
           echo "Pulling ${IMAGE}..."
           if docker pull "${IMAGE}"; then
@@ -132,9 +134,9 @@ jobs:
             CODEX_VERSION=${{ steps.latest.outputs.latest_version }}
             CODEX_RELAY_VERSION=${{ steps.latest.outputs.latest_relay_version }}
           tags: |
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}-relay-${{ steps.latest.outputs.latest_relay_version }}
+            ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}
+            ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}-relay-${{ steps.latest.outputs.latest_relay_version }}
           labels: |
             org.opencontainers.image.title=${{ env.IMAGE_NAME }}
             org.opencontainers.image.description=OpenAI Codex CLI development container
@@ -155,5 +157,5 @@ jobs:
             echo "| Current image Codex Relay version | ${{ steps.current.outputs.current_relay_version }} |"
             echo "| Should build | ${{ steps.decision.outputs.should_build }} |"
             echo "| Reason | ${{ steps.decision.outputs.reason }} |"
-            echo "| Image | ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }} |"
+            echo "| Image | ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }} |"
           } >> "$GITHUB_STEP_SUMMARY"

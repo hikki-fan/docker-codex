@@ -25,15 +25,10 @@ Settings
   -> Actions
 ```
 
-Add this variable:
+Add these repository secrets:
 
 ```text
 DOCKERHUB_USERNAME = your Docker Hub username
-```
-
-Add this secret:
-
-```text
 DOCKERHUB_TOKEN = your Docker Hub access token
 ```
 
