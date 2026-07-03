@@ -4,6 +4,8 @@ Build a personal Docker image for the OpenAI Codex CLI and Codex Relay, then pub
 
 The image installs pinned `@openai/codex` and `codex-relay` versions from npm. GitHub Actions checks the latest npm versions every day and only rebuilds the Docker image when Codex or Codex Relay has changed.
 
+It also includes common terminal tools and `bubblewrap` for sandbox support.
+
 ## Files
 
 ```text

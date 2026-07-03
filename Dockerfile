@@ -24,6 +24,7 @@ RUN apt update && \
       bash \
       less \
       ripgrep \
+      bubblewrap \
       jq \
       && rm -rf /var/lib/apt/lists/*
 
