@@ -15,6 +15,7 @@ on:
       - main
     paths:
       - Dockerfile
+      - docker/**
       - .github/workflows/update-codex-image.yml
 
 permissions:
@@ -51,10 +52,13 @@ jobs:
         run: |
           LATEST_VERSION=$(npm view @openai/codex version)
           LATEST_RELAY_VERSION=$(npm view codex-relay version)
+          LATEST_AGY_VERSION=$(curl -fsSL https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json | jq -r '.version')
           echo "latest_version=${LATEST_VERSION}" >> "$GITHUB_OUTPUT"
           echo "latest_relay_version=${LATEST_RELAY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "latest_agy_version=${LATEST_AGY_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Latest Codex version: ${LATEST_VERSION}"
           echo "Latest Codex Relay version: ${LATEST_RELAY_VERSION}"
+          echo "Latest Antigravity CLI version: ${LATEST_AGY_VERSION}"
 
       - name: Get current Codex version from Docker image
         id: current
@@ -66,15 +70,19 @@ jobs:
           if docker pull "${IMAGE}"; then
             CURRENT_VERSION=$(docker run --rm "${IMAGE}" bash -lc "codex --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -n 1 || true")
             CURRENT_RELAY_VERSION=$(docker run --rm "${IMAGE}" bash -lc "node -p \"require('/usr/local/lib/node_modules/codex-relay/package.json').version\" 2>/dev/null || true")
+            CURRENT_AGY_VERSION=$(docker run --rm "${IMAGE}" bash -lc "agy --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true")
           else
             CURRENT_VERSION=""
             CURRENT_RELAY_VERSION=""
+            CURRENT_AGY_VERSION=""
           fi
 
           echo "current_version=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
           echo "current_relay_version=${CURRENT_RELAY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "current_agy_version=${CURRENT_AGY_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Current image Codex version: ${CURRENT_VERSION}"
           echo "Current image Codex Relay version: ${CURRENT_RELAY_VERSION}"
+          echo "Current image Antigravity CLI version: ${CURRENT_AGY_VERSION}"
 
       - name: Decide whether to build
         id: decision
@@ -83,6 +91,8 @@ jobs:
           LATEST_RELAY="${{ steps.latest.outputs.latest_relay_version }}"
           CURRENT="${{ steps.current.outputs.current_version }}"
           CURRENT_RELAY="${{ steps.current.outputs.current_relay_version }}"
+          LATEST_AGY="${{ steps.latest.outputs.latest_agy_version }}"
+          CURRENT_AGY="${{ steps.current.outputs.current_agy_version }}"
           EVENT="${{ github.event_name }}"
           FORCE_BUILD="${{ inputs.force_build || false }}"
 
@@ -90,6 +100,8 @@ jobs:
           echo "Current: ${CURRENT}"
           echo "Latest relay:  ${LATEST_RELAY}"
           echo "Current relay: ${CURRENT_RELAY}"
+          echo "Latest agy:  ${LATEST_AGY}"
+          echo "Current agy: ${CURRENT_AGY}"
           echo "Event:   ${EVENT}"
           echo "Force:   ${FORCE_BUILD}"
 
@@ -113,6 +125,14 @@ jobs:
             echo "Codex Relay version changed. Build required."
             echo "reason=codex-relay-version-changed" >> "$GITHUB_OUTPUT"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${CURRENT_AGY}" ]; then
+            echo "No existing Antigravity CLI version found. Build required."
+            echo "reason=no-current-agy-version" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${LATEST_AGY}" != "${CURRENT_AGY}" ]; then
+            echo "Antigravity CLI version changed. Build required."
+            echo "reason=agy-version-changed" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           elif [ "${EVENT}" = "push" ]; then
             echo "Build configuration changed. Build required."
             echo "reason=build-config-changed" >> "$GITHUB_OUTPUT"
@@ -133,6 +153,7 @@ jobs:
           build-args: |
             CODEX_VERSION=${{ steps.latest.outputs.latest_version }}
             CODEX_RELAY_VERSION=${{ steps.latest.outputs.latest_relay_version }}
+            AGY_VERSION=${{ steps.latest.outputs.latest_agy_version }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}
@@ -142,6 +163,7 @@ jobs:
             org.opencontainers.image.description=OpenAI Codex CLI development container
             org.opencontainers.image.version=${{ steps.latest.outputs.latest_version }}
             org.opencontainers.image.codex-relay.version=${{ steps.latest.outputs.latest_relay_version }}
+            org.opencontainers.image.antigravity.version=${{ steps.latest.outputs.latest_agy_version }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
       - name: Summary
@@ -155,6 +177,8 @@ jobs:
             echo "| Current image version | ${{ steps.current.outputs.current_version }} |"
             echo "| Latest Codex Relay version | ${{ steps.latest.outputs.latest_relay_version }} |"
             echo "| Current image Codex Relay version | ${{ steps.current.outputs.current_relay_version }} |"
+            echo "| Latest Antigravity CLI version | ${{ steps.latest.outputs.latest_agy_version }} |"
+            echo "| Current image Antigravity CLI version | ${{ steps.current.outputs.current_agy_version }} |"
             echo "| Should build | ${{ steps.decision.outputs.should_build }} |"
             echo "| Reason | ${{ steps.decision.outputs.reason }} |"
             echo "| Image | ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }} |"
