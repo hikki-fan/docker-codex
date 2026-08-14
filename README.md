@@ -2,7 +2,7 @@
 
 Build a personal Docker image for the OpenAI Codex CLI and Codex Relay, then publish it to Docker Hub.
 
-The image installs pinned `@openai/codex` and `codex-relay` versions from npm. GitHub Actions checks the latest npm versions every day and only rebuilds the Docker image when Codex or Codex Relay has changed.
+The image installs `@openai/codex`, `codex-relay`, Google Antigravity CLI (`agy`), GitHub CLI (`gh`), and common terminal tools. GitHub Actions checks the latest upstream versions every day and rebuilds the Docker image when Codex, Codex Relay, or Antigravity CLI changes.
 
 It also includes common terminal tools and `bubblewrap` for sandbox support. The compose file grants the container the extra sandbox permissions bubblewrap needs inside Docker.
 
@@ -43,7 +43,7 @@ The workflow in `.github/workflows/update-codex-image.yml` runs in three cases:
 ```text
 1. Every day at 03:00 UTC
 2. Manually from the GitHub Actions page, optionally with force rebuild enabled
-3. When Dockerfile or the workflow file changes on main
+3. When Dockerfile, files under `docker/`, or the workflow file change on main
 ```
 
 Each run checks:
@@ -51,8 +51,10 @@ Each run checks:
 ```text
 npm view @openai/codex version
 npm view codex-relay version
+curl -fsSL https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json | jq -r '.version'
 docker run your-dockerhub-username/codex-dev:latest codex --version
 docker run your-dockerhub-username/codex-dev:latest node -p "require('/usr/local/lib/node_modules/codex-relay/package.json').version"
+docker run your-dockerhub-username/codex-dev:latest agy --version
 ```
 
 It builds and pushes only when one of these is true:
@@ -61,8 +63,9 @@ It builds and pushes only when one of these is true:
 1. No current Docker Hub image exists
 2. The npm Codex version is newer than the image version
 3. The npm Codex Relay version is newer than the image version
-4. Dockerfile or the workflow file changed
-5. A manual run enables force rebuild
+4. The Antigravity CLI version is newer than the image version
+5. Dockerfile, a file under `docker/`, or the workflow file changed
+6. A manual run enables force rebuild
 ```
 
 ## Image Tags
@@ -117,9 +120,11 @@ Creating new namespace failed: Operation not permitted
 ```bash
 CODEX_VERSION=$(npm view @openai/codex version)
 CODEX_RELAY_VERSION=$(npm view codex-relay version)
+AGY_VERSION=$(curl -fsSL https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json | jq -r .version)
 docker build \
   --build-arg CODEX_VERSION="${CODEX_VERSION}" \
   --build-arg CODEX_RELAY_VERSION="${CODEX_RELAY_VERSION}" \
+  --build-arg AGY_VERSION="${AGY_VERSION}" \
   -t codex-dev:local .
 ```
 
@@ -180,6 +185,7 @@ codex
 GitHub Actions schedule
   -> npm view @openai/codex version
   -> npm view codex-relay version
+  -> Antigravity release manifest version
   -> docker pull Docker Hub latest image
   -> docker run latest image and read codex / codex-relay versions
   -> build and push only when an update is needed
