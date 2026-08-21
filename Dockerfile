@@ -47,6 +47,12 @@ RUN npm_config_proxy="${HTTP_PROXY}" \
     npm_config_fetch_retries=2 \
     npm install -g @openai/codex@${CODEX_VERSION} codex-relay@${CODEX_RELAY_VERSION}
 
+# Keep the real CLI available while making `codex resume` attach to Relay's
+# shared app-server automatically. Other Codex subcommands pass through.
+RUN mv /usr/local/bin/codex /usr/local/bin/codex-real
+COPY docker/codex-wrapper /usr/local/bin/codex
+RUN chmod +x /usr/local/bin/codex
+
 # AGY_VERSION invalidates this layer when the upstream Antigravity release changes.
 # The official installer downloads the current binary and verifies its SHA-512 digest.
 RUN echo "Installing Antigravity CLI ${AGY_VERSION}" && \

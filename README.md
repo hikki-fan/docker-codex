@@ -156,13 +156,25 @@ codex login
 codex
 ```
 
-The container starts the preinstalled Codex Relay in the background first:
+The container starts the preinstalled Codex Relay in shared app-server mode:
 
 ```bash
-codex-relay --bg
+codex-relay --bg --shared-app-server
 ```
 
-Then it starts Codex automatically inside a detached `tmux` session named `codex`.
+The image wraps the Codex executable so `codex resume` automatically connects to
+the shared Unix socket. Other Codex commands are passed through unchanged. The
+explicit equivalent is:
+
+```bash
+codex resume --remote unix://
+```
+
+Then it starts a shell inside a detached `tmux` session named `codex`.
+
+Use one active turn per thread. Relay/mobile and the terminal can observe the
+same live session through the shared app-server, but a second prompt submitted
+while a turn is running must wait for the current turn to finish.
 
 Attach from a phone SSH session:
 

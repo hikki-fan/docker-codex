@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -e
+
+CODEX_REAL=/usr/local/bin/codex-real
+
+# Attach terminal resume commands to Relay's shared Unix-socket app-server.
+# Keep an explicitly supplied --remote endpoint unchanged.
+if [[ "${1:-}" == "resume" ]]; then
+  has_remote=0
+  for arg in "$@"; do
+    if [[ "$arg" == "--remote" || "$arg" == --remote=* ]]; then
+      has_remote=1
+      break
+    fi
+  done
+
+  if (( ! has_remote )); then
+    shift
+    exec "$CODEX_REAL" resume --remote unix:// "$@"
+  fi
+fi
+
+exec "$CODEX_REAL" "$@"
