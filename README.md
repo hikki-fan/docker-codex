@@ -227,6 +227,13 @@ The mobile client itself may briefly reconnect while Relay restarts. Its thread
 history remains the same local app-server rollout; the monitor does not need
 mobile pairing tokens and never submits a prompt through the mobile API.
 
+The startup script also runs a small `codex-warmup-scheduler`. It executes
+`codex-switch warmup --json` once during the 07:00 hour in `Asia/Shanghai` and
+writes its result to `/home/codex/.codex-switch/logs/warmup.log`. It does not
+start `codex-switch daemon` or switch profiles; the account supervisor remains
+the only component that can switch accounts. Set `CODEX_WARMUP_TZ` or
+`CODEX_WARMUP_HOUR` only when the deployment uses a different local schedule.
+
 Inspect the live integration without exposing credentials:
 
 ```bash

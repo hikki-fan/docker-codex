@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -u
+
+# Run quota warmup once during the configured local 07:00 hour. This is
+# intentionally separate from codex-switch's daemon: the account supervisor
+# owns profile switching, while this process only warms inactive windows.
+export PATH="/usr/local/bin:/home/codex/.local/bin:/usr/bin:/bin:${PATH:-}"
+export HOME="${HOME:-/home/codex}"
+export TZ="${CODEX_WARMUP_TZ:-Asia/Shanghai}"
+
+WARMUP_BIN="${CODEX_WARMUP_BIN:-/home/codex/.local/bin/codex-switch}"
+LOG_DIR="${CODEX_WARMUP_LOG_DIR:-/home/codex/.codex-switch/logs}"
+LOG_FILE="${CODEX_WARMUP_LOG_FILE:-${LOG_DIR}/warmup.log}"
+TARGET_HOUR="${CODEX_WARMUP_HOUR:-07}"
+POLL_SECONDS="${CODEX_WARMUP_POLL_SECONDS:-20}"
+
+mkdir -p "${LOG_DIR}"
+chmod 700 "${LOG_DIR}" 2>/dev/null || true
+
+log() {
+  printf '%s [warmup-scheduler] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$*" >>"${LOG_FILE}"
+}
+
+run_warmup() {
+  if [ ! -x "${WARMUP_BIN}" ]; then
+    log "skipped: codex-switch not found at ${WARMUP_BIN}"
+    return 1
+  fi
+
+  log "starting daily warmup"
+  "${WARMUP_BIN}" warmup --json >>"${LOG_FILE}" 2>&1
+  local exit_code=$?
+  if [ "${exit_code}" -eq 0 ]; then
+    log "daily warmup completed"
+    return 0
+  fi
+
+  log "daily warmup failed exit_code=${exit_code}"
+  return "${exit_code}"
+}
+
+# A one-shot mode makes the scheduler safely testable without waiting for the
+# wall clock. It is not enabled by the container startup script.
+if [ "${CODEX_WARMUP_ONCE:-0}" = "1" ]; then
+  run_warmup
+  exit $?
+fi
+
+last_run_date=""
+while :; do
+  local_date="$(date +%F)"
+  local_hour="$(date +%H)"
+
+  # Use the whole 07:00 hour as a small tolerance window for startup and
+  # scheduler jitter, while still running at most once per local calendar day.
+  if [ "${local_hour}" = "${TARGET_HOUR}" ] && [ "${last_run_date}" != "${local_date}" ]; then
+    run_warmup || true
+    last_run_date="${local_date}"
+  fi
+
+  sleep "${POLL_SECONDS}"
+done

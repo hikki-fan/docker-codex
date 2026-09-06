@@ -44,6 +44,7 @@ SUPERVISOR_CONFIG="${CODEX_SUPERVISOR_CONFIG:-${SUPERVISOR_DIR}/config.toml}"
 SUPERVISOR_LOG="${SUPERVISOR_DIR}/supervisor.log"
 SUPERVISOR_PID="${SUPERVISOR_DIR}/supervisor.pid"
 TURN_MONITOR_PID="${SUPERVISOR_DIR}/turn-monitor.pid"
+WARMUP_SCHEDULER_PID="${SUPERVISOR_DIR}/warmup-scheduler.pid"
 mkdir -p "${SUPERVISOR_DIR}"
 chmod 700 "${SUPERVISOR_DIR}"
 
@@ -85,6 +86,22 @@ if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
       </dev/null >>"${SUPERVISOR_LOG}" 2>&1 &
     echo $! >"${TURN_MONITOR_PID}"
     chmod 600 "${TURN_MONITOR_PID}" 2>/dev/null || true
+  fi
+fi
+
+# Warm quota windows once per day without enabling codex-switch's account
+# switching daemon. The account supervisor remains the sole switch owner.
+if [ -x /usr/local/bin/codex-warmup-scheduler ] && \
+   [ -x /home/codex/.local/bin/codex-switch ]; then
+  if [ -f "${WARMUP_SCHEDULER_PID}" ] && kill -0 "$(cat "${WARMUP_SCHEDULER_PID}")" 2>/dev/null; then
+    true
+  else
+    rm -f "${WARMUP_SCHEDULER_PID}"
+    CODEX_WARMUP_TZ="${TZ:-Asia/Shanghai}" \
+      setsid /usr/local/bin/codex-warmup-scheduler \
+      </dev/null >>"${SUPERVISOR_LOG}" 2>&1 &
+    echo $! >"${WARMUP_SCHEDULER_PID}"
+    chmod 600 "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true
   fi
 fi
 

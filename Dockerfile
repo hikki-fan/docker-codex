@@ -64,13 +64,15 @@ COPY docker/start-codex-container.sh /usr/local/bin/start-codex-container
 COPY docker/codex-supervisor-new-thread /usr/local/bin/codex-supervisor-new-thread
 COPY docker/codex-supervisor-run-thread /usr/local/bin/codex-supervisor-run-thread
 COPY docker/codex-supervisor-turn-monitor.mjs /usr/local/bin/codex-supervisor-turn-monitor.mjs
+COPY docker/codex-warmup-scheduler /usr/local/bin/codex-warmup-scheduler
 COPY docker/codex-supervisor.toml /usr/local/share/codex-supervisor/config.toml
 
 RUN chmod +x \
       /usr/local/bin/start-codex-container \
       /usr/local/bin/codex-supervisor-new-thread \
       /usr/local/bin/codex-supervisor-run-thread \
-      /usr/local/bin/codex-supervisor-turn-monitor.mjs && \
+      /usr/local/bin/codex-supervisor-turn-monitor.mjs \
+      /usr/local/bin/codex-warmup-scheduler && \
     chmod 0644 /usr/local/share/codex-supervisor/config.toml
 
 WORKDIR /workspace
