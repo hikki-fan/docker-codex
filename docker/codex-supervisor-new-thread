@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Launch a supervisor continuation packet in a detached tmux Codex client.
+
+The supervisor calls this hook only after a successful account cutover and
+Relay health check.  The packet contains workspace/task metadata, never
+credentials or transcripts.  This hook deliberately passes only a generated
+packet path to tmux; the runner reads the prompt and uses os.execv, avoiding a
+shell interpolation of prompt text.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+HANDOFF_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--handoff", required=True, help="Continuation packet JSON path")
+    return parser.parse_args()
+
+
+def _fail(message: str) -> int:
+    # Do not echo packet contents or prompt text to logs.
+    print(f"codex supervisor handoff: {message}", file=sys.stderr)
+    return 1
+
+
+def main() -> int:
+    args = _parse_args()
+    packet_path = Path(args.handoff).resolve()
+    handoff_dir = Path(os.environ.get("CODEX_SUPERVISOR_HANDOFF_DIR", "/home/codex/.codex-supervisor/handoffs")).resolve()
+    try:
+        packet_path.relative_to(handoff_dir)
+    except ValueError:
+        return _fail("handoff path is outside the configured handoff directory")
+
+    try:
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _fail("cannot read continuation packet")
+
+    handoff_id = str(packet.get("handoff_id", ""))
+    prompt = packet.get("new_thread_prompt")
+    workspace = Path(str(packet.get("workspace_path", "/workspace"))).resolve()
+    if not HANDOFF_ID_RE.fullmatch(handoff_id):
+        return _fail("invalid handoff id")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return _fail("continuation prompt is missing")
+    if len(prompt) > 20000:
+        return _fail("continuation prompt is too large")
+    if not workspace.is_dir():
+        return _fail("continuation workspace does not exist")
+
+    tmux = os.environ.get("CODEX_SUPERVISOR_TMUX", "/usr/bin/tmux")
+    runner = os.environ.get("CODEX_SUPERVISOR_RUNNER", "/usr/local/bin/codex-supervisor-run-thread")
+    session = f"codex-handoff-{handoff_id[:16]}"
+
+    existing = subprocess.run(
+        [tmux, "has-session", "-t", session],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if existing.returncode == 0:
+        return 0
+
+    try:
+        result = subprocess.run(
+            [tmux, "new-session", "-d", "-s", session, "--", runner, str(packet_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _fail("failed to create tmux continuation session")
+    if result.returncode != 0:
+        return _fail("tmux refused continuation session")
+
+    # Catch an immediately crashing runner, while avoiding a long blocking hook.
+    time.sleep(1.0)
+    alive = subprocess.run(
+        [tmux, "has-session", "-t", session],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if alive.returncode != 0:
+        return _fail("continuation session exited immediately")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

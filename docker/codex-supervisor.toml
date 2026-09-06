@@ -1,0 +1,37 @@
+# Conservative container defaults for codex-account-supervisor.
+# Keep this file free of tokens, account data, and auth paths.
+
+used_threshold_percent = 95.0
+target_max_used_percent = 95.0
+check_interval_seconds = 30.0
+cooldown_seconds = 300.0
+
+# A cutover is allowed only after a client records the current turn as idle.
+# This prevents a Relay/mobile request from being interrupted mid-turn.
+drain_timeout_seconds = 60.0
+drain_poll_interval_seconds = 2.0
+require_explicit_idle = true
+turn_signal_stale_seconds = 30.0
+
+max_consecutive_failures = 3
+circuit_break_cooldown_seconds = 600.0
+
+base_dir = "/home/codex/.codex-supervisor"
+state_file = "/home/codex/.codex-supervisor/state.json"
+lock_file = "/home/codex/.codex-supervisor/supervisor.lock"
+turn_signal_file = "/home/codex/.codex-supervisor/turn_state.json"
+handoff_dir = "/home/codex/.codex-supervisor/handoffs"
+workspace_path = "/workspace"
+
+relay_pid_file = "~/.local/share/codex-relay/server.pid"
+usage_command = "/home/codex/.local/bin/codex-switch --json list"
+switch_command = "/home/codex/.local/bin/codex-switch use {alias}"
+relay_start_command = "/usr/local/bin/codex-relay --bg --shared-app-server"
+relay_stop_command = "/usr/local/bin/codex-relay stop"
+
+# Starts a separate tmux Codex client against Relay's Unix app-server.  The
+# hook is executed only after the cutover and health check succeed.
+handoff_hook_command = "/usr/local/bin/codex-supervisor-new-thread --handoff {handoff_file}"
+
+dry_run = false
+log_level = "INFO"

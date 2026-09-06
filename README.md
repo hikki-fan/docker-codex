@@ -12,6 +12,11 @@ It also includes common terminal tools and `bubblewrap` for sandbox support. The
 .
 |-- Dockerfile
 |-- docker-compose.yml
+|-- docker/
+|   |-- start-codex-container.sh
+|   |-- codex-supervisor.toml
+|   |-- codex-supervisor-new-thread
+|   `-- codex-supervisor-run-thread
 `-- .github/
     `-- workflows/
         `-- update-codex-image.yml
@@ -171,6 +176,55 @@ codex resume --remote unix://
 ```
 
 Then it starts a shell inside a detached `tmux` session named `codex`.
+
+## Account Supervisor
+
+The container can run the private `codex-account-supervisor` from the persistent
+workspace. Keep the checkout outside the image, for example:
+
+```bash
+git clone https://github.com/hikki-fan/codex-account-supervisor.git \
+  /share/Docker/codex/workspace/codex-account-supervisor
+```
+
+The startup script then automatically:
+
+1. Stops `codex-switch`'s background daemon so it cannot race the supervisor.
+2. Starts one supervisor instance with a 95% *used* quota threshold.
+3. Uses the official Relay PID file and `codex-relay stop`/`--bg --shared-app-server`.
+4. Keeps state, locks, handoff packets, and logs under
+   `/home/codex/.codex-supervisor` (the persistent `/home/codex` mount).
+
+The supervisor deliberately requires an explicit idle signal before switching
+accounts. A Relay/mobile client that does not send signals will therefore be
+drained safely rather than being interrupted mid-turn. A client integration can
+record a turn boundary with:
+
+```bash
+PYTHONPATH=/workspace/codex-account-supervisor \
+  python3 -m codex_account_supervisor turn-signal active \
+  --turn-id TURN_ID --thread-id THREAD_ID
+
+# after the turn is complete
+PYTHONPATH=/workspace/codex-account-supervisor \
+  python3 -m codex_account_supervisor turn-signal idle --turn-id TURN_ID
+```
+
+After a successful cutover and Relay health check, the configured hook creates a
+new detached `tmux` session (`codex-handoff-*`) and starts a fresh Codex thread
+against Relay's Unix app-server. It does not attempt to resume the old
+account-bound thread.
+
+Inspect the live integration without exposing credentials:
+
+```bash
+docker exec codex sh -lc \
+  'ps -ef | grep -E "[c]odex_account_supervisor|[c]odex-relay"; \
+   tail -n 50 /home/codex/.codex-supervisor/supervisor.log'
+```
+
+If the private supervisor checkout is absent, the container continues to run
+Relay and the normal terminal session, but logs that quota handoff is disabled.
 
 Use one active turn per thread. Relay/mobile and the terminal can observe the
 same live session through the shared app-server, but a second prompt submitted
