@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Exec the Codex CLI for a validated continuation packet."""
+"""Resume or start Codex for a validated continuation packet."""
 
 from __future__ import annotations
 
 import json
 import os
 import sys
+import subprocess
+import time
+import argparse
 from pathlib import Path
 
 
@@ -15,9 +18,12 @@ def fail(message: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        return fail("expected one continuation packet path")
-    packet_path = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("packet", help="Continuation packet path")
+    parser.add_argument("--resume-existing", action="store_true")
+    args = parser.parse_args()
+
+    packet_path = Path(args.packet).resolve()
     handoff_dir = Path(os.environ.get("CODEX_SUPERVISOR_HANDOFF_DIR", "/home/codex/.codex-supervisor/handoffs")).resolve()
     try:
         packet_path.relative_to(handoff_dir)
@@ -37,6 +43,24 @@ def main() -> int:
     if not Path(codex).is_file():
         return fail("codex-real executable is not installed")
     os.chdir(workspace)
+
+    # Resume uses the same local rollout ID after a verified account switch.
+    # The installed CLI may reject that operation; only an early startup
+    # failure is eligible for the new-thread fallback.  A normal user exit
+    # after a long-running TUI must never create a duplicate thread.
+    thread_id = str(packet.get("dead_thread_id") or "").strip()
+    if args.resume_existing and thread_id:
+        started = time.monotonic()
+        resumed = subprocess.run(
+            [codex, "resume", "--remote", "unix://", "--no-alt-screen", "-C", str(workspace), thread_id, prompt],
+            cwd=str(workspace),
+            check=False,
+        )
+        if resumed.returncode == 0:
+            return 0
+        if time.monotonic() - started > 30.0:
+            return resumed.returncode
+
     os.execv(codex, [codex, "--remote", "unix://", "--no-alt-screen", "-C", str(workspace), prompt])
     return 0
 

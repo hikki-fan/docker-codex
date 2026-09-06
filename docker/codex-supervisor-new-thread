@@ -2,10 +2,11 @@
 """Launch a supervisor continuation packet in a detached tmux Codex client.
 
 The supervisor calls this hook only after a successful account cutover and
-Relay health check.  The packet contains workspace/task metadata, never
-credentials or transcripts.  This hook deliberately passes only a generated
-packet path to tmux; the runner reads the prompt and uses os.execv, avoiding a
-shell interpolation of prompt text.
+Relay health check.  Depending on the configured flag, the runner first tries
+the original thread ID on the new account and falls back to a new thread.  The
+packet contains workspace/task metadata, never credentials or transcripts.
+This hook deliberately passes only a generated packet path to tmux; the runner
+reads the prompt and uses argv, avoiding shell interpolation of prompt text.
 """
 
 from __future__ import annotations
@@ -26,6 +27,11 @@ HANDOFF_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--handoff", required=True, help="Continuation packet JSON path")
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help="Ask the runner to resume the packet's original thread before falling back",
+    )
     return parser.parse_args()
 
 
@@ -75,8 +81,11 @@ def main() -> int:
         return 0
 
     try:
+        runner_args = [runner, str(packet_path)]
+        if args.resume_existing:
+            runner_args.append("--resume-existing")
         result = subprocess.run(
-            [tmux, "new-session", "-d", "-s", session, "--", runner, str(packet_path)],
+            [tmux, "new-session", "-d", "-s", session, "--", *runner_args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,

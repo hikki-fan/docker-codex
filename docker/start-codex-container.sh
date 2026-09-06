@@ -43,6 +43,7 @@ SUPERVISOR_DIR="${CODEX_SUPERVISOR_DIR:-/home/codex/.codex-supervisor}"
 SUPERVISOR_CONFIG="${CODEX_SUPERVISOR_CONFIG:-${SUPERVISOR_DIR}/config.toml}"
 SUPERVISOR_LOG="${SUPERVISOR_DIR}/supervisor.log"
 SUPERVISOR_PID="${SUPERVISOR_DIR}/supervisor.pid"
+TURN_MONITOR_PID="${SUPERVISOR_DIR}/turn-monitor.pid"
 mkdir -p "${SUPERVISOR_DIR}"
 chmod 700 "${SUPERVISOR_DIR}"
 
@@ -66,6 +67,25 @@ if [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
   fi
 else
   echo "codex-account-supervisor source not found; quota handoff supervisor is disabled" >&2
+fi
+
+# Observe the shared app-server's turn lifecycle.  This covers terminal Codex
+# and Relay/mobile turns without requiring mobile pairing credentials.  If the
+# observer disconnects it writes UNKNOWN, so the supervisor refuses a cutover
+# until a fresh snapshot is available.
+if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
+   [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
+  if [ -f "${TURN_MONITOR_PID}" ] && kill -0 "$(cat "${TURN_MONITOR_PID}")" 2>/dev/null; then
+    true
+  else
+    rm -f "${TURN_MONITOR_PID}"
+    CODEX_SUPERVISOR_SOURCE="${SUPERVISOR_SOURCE}" \
+    CODEX_SUPERVISOR_CONFIG="${SUPERVISOR_CONFIG}" \
+      setsid node /usr/local/bin/codex-supervisor-turn-monitor.mjs \
+      </dev/null >>"${SUPERVISOR_LOG}" 2>&1 &
+    echo $! >"${TURN_MONITOR_PID}"
+    chmod 600 "${TURN_MONITOR_PID}" 2>/dev/null || true
+  fi
 fi
 
 tmux has-session -t codex 2>/dev/null ||

@@ -16,7 +16,8 @@ It also includes common terminal tools and `bubblewrap` for sandbox support. The
 |   |-- start-codex-container.sh
 |   |-- codex-supervisor.toml
 |   |-- codex-supervisor-new-thread
-|   `-- codex-supervisor-run-thread
+|   |-- codex-supervisor-run-thread
+|   `-- codex-supervisor-turn-monitor.mjs
 `-- .github/
     `-- workflows/
         `-- update-codex-image.yml
@@ -195,10 +196,15 @@ The startup script then automatically:
 4. Keeps state, locks, handoff packets, and logs under
    `/home/codex/.codex-supervisor` (the persistent `/home/codex` mount).
 
-The supervisor deliberately requires an explicit idle signal before switching
-accounts. A Relay/mobile client that does not send signals will therefore be
-drained safely rather than being interrupted mid-turn. A client integration can
-record a turn boundary with:
+The image now includes a read-only app-server turn monitor. It connects to the
+shared Unix app-server, resumes/listens to known threads, and records
+`turn/started` plus terminal events for both terminal Codex and Relay/mobile
+traffic. If the socket or a thread resync fails, it records `UNKNOWN`; the
+supervisor then refuses to switch until a fresh snapshot is available.
+
+The supervisor still requires an explicit idle state before switching accounts,
+but the monitor supplies that state automatically. A manual/client integration
+can also record a turn boundary with:
 
 ```bash
 PYTHONPATH=/workspace/codex-account-supervisor \
@@ -211,9 +217,15 @@ PYTHONPATH=/workspace/codex-account-supervisor \
 ```
 
 After a successful cutover and Relay health check, the configured hook creates a
-new detached `tmux` session (`codex-handoff-*`) and starts a fresh Codex thread
-against Relay's Unix app-server. It does not attempt to resume the old
-account-bound thread.
+detached `tmux` session (`codex-handoff-*`) and first attempts to resume the
+original thread on the new account. This is enabled only in the container
+config after validating the current Codex CLI/Relay behavior. If resume is
+rejected immediately, the hook falls back to a new thread with the continuation
+packet. The supervisor no longer marks the original thread dead in this mode.
+
+The mobile client itself may briefly reconnect while Relay restarts. Its thread
+history remains the same local app-server rollout; the monitor does not need
+mobile pairing tokens and never submits a prompt through the mobile API.
 
 Inspect the live integration without exposing credentials:
 
