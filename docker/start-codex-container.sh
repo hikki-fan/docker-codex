@@ -48,6 +48,17 @@ WARMUP_SCHEDULER_PID="${SUPERVISOR_DIR}/warmup-scheduler.pid"
 mkdir -p "${SUPERVISOR_DIR}"
 chmod 700 "${SUPERVISOR_DIR}"
 
+pid_is_live() {
+  local candidate="$1"
+  case "${candidate}" in
+    (''|*[!0-9]*) return 1 ;;
+  esac
+  [ -r "/proc/${candidate}/status" ] || return 1
+  local state
+  state=$(awk '/^State:/{print $2; exit}' "/proc/${candidate}/status" 2>/dev/null || true)
+  [ "${state}" != "Z" ] && kill -0 "${candidate}" 2>/dev/null
+}
+
 # Never overwrite an operator's persistent config.  The shipped file is a
 # conservative default (98% used threshold and explicit idle signal required).
 if [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/config.toml ]; then
@@ -55,7 +66,7 @@ if [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/con
 fi
 
 if [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
-  if [ -f "${SUPERVISOR_PID}" ] && kill -0 "$(cat "${SUPERVISOR_PID}")" 2>/dev/null; then
+  if [ -f "${SUPERVISOR_PID}" ] && pid_is_live "$(cat "${SUPERVISOR_PID}" 2>/dev/null || true)"; then
     : # An already-running instance owns the lock; do not create a duplicate.
     true
   else
@@ -76,7 +87,7 @@ fi
 # until a fresh snapshot is available.
 if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
    [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
-  if [ -f "${TURN_MONITOR_PID}" ] && kill -0 "$(cat "${TURN_MONITOR_PID}")" 2>/dev/null; then
+  if [ -f "${TURN_MONITOR_PID}" ] && pid_is_live "$(cat "${TURN_MONITOR_PID}" 2>/dev/null || true)"; then
     true
   else
     rm -f "${TURN_MONITOR_PID}"

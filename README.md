@@ -296,6 +296,10 @@ sorted order to A/B. To pin the mapping and cycle anchor, set
 startup is persisted as day 1. The `codex-switch` daemon remains disabled; the account
 supervisor is still the only component allowed to switch accounts.
 
+Startup PID checks ignore zombie processes. After an unclean container shutdown,
+a reparented zombie monitor or supervisor no longer blocks startup from
+removing its stale PID file and launching exactly one live process.
+
 Inspect the live integration without exposing credentials:
 
 ```bash
