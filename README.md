@@ -178,6 +178,11 @@ codex resume --remote unix://
 
 Then it starts a shell inside a detached `tmux` session named `codex`.
 
+The startup script also restores the unified Agent Executor Gateway client and
+starts its singleton watchdog from `/workspace/agent-executor-gateway`. The
+retired legacy ACP bridge is intentionally not started, so AGY and Grok remain
+available through the generic `/v1/executors/*` production API after rebuilds.
+
 ## Account Supervisor
 
 The container can run the private `codex-account-supervisor` from the persistent
@@ -191,7 +196,9 @@ git clone https://github.com/hikki-fan/codex-account-supervisor.git \
 The startup script then automatically:
 
 1. Stops `codex-switch`'s background daemon so it cannot race the supervisor.
-2. Starts one supervisor instance with a 95% *used* quota threshold.
+2. Starts one supervisor instance with a 98% *used* quota threshold. A target
+   is eligible only while its own 5-hour usage is strictly below 98%; if every
+   account is at or above 98%, the supervisor pauses without switching.
 3. Uses the official Relay PID file and `codex-relay stop`/`--bg --shared-app-server`.
 4. Keeps state, locks, handoff packets, and logs under
    `/home/codex/.codex-supervisor` (the persistent `/home/codex` mount).

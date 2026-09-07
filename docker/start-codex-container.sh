@@ -15,18 +15,18 @@ if [ -x /home/codex/.local/bin/codex-switch ]; then
   /home/codex/.local/bin/codex-switch daemon stop >/dev/null 2>&1 || true
 fi
 
-# Restore the ACP CLI after a container rebuild. Prefer the canonical
-# persistent install, and fall back to the checked-out bridge repository.
-if [ -x /workspace/scripts/acp-cli ]; then
-  ln -sf /workspace/scripts/acp-cli /usr/local/bin/acp-cli
-elif [ -x /workspace/antigravity-rest-bridge/acp-cli ]; then
-  ln -sf /workspace/antigravity-rest-bridge/acp-cli /usr/local/bin/acp-cli
+# AGENT_EXECUTOR_GATEWAY_STARTUP_HANDOFF
+# Restore only the unified Agent Executor Gateway client and watchdog. The
+# retired legacy bridge must not compete for port 8765 after a container
+# rebuild, otherwise the AGY/Grok executor routes disappear behind its older
+# health-only API.
+GATEWAY_CLI="/workspace/agent-executor-gateway/acp-cli"
+GATEWAY_WATCHDOG="/workspace/agent-executor-gateway/scripts/gateway_watchdog.sh"
+if [ -x "${GATEWAY_CLI}" ]; then
+  ln -sf "${GATEWAY_CLI}" /usr/local/bin/acp-cli
 fi
-
-# Start the health watchdog when the bridge has been installed in the
-# persistent workspace. Its singleton lock makes repeated starts harmless.
-if [ -f /workspace/scripts/acp_watchdog.sh ]; then
-  setsid bash /workspace/scripts/acp_watchdog.sh </dev/null >/dev/null 2>&1 &
+if [ -x "${GATEWAY_WATCHDOG}" ]; then
+  setsid bash "${GATEWAY_WATCHDOG}" </dev/null >/dev/null 2>&1 &
 fi
 
 # The supervisor source is intentionally kept on the persistent workspace (or
@@ -49,7 +49,7 @@ mkdir -p "${SUPERVISOR_DIR}"
 chmod 700 "${SUPERVISOR_DIR}"
 
 # Never overwrite an operator's persistent config.  The shipped file is a
-# conservative default (95% threshold and explicit idle signal required).
+# conservative default (98% used threshold and explicit idle signal required).
 if [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/config.toml ]; then
   install -m 600 /usr/local/share/codex-supervisor/config.toml "${SUPERVISOR_CONFIG}"
 fi
