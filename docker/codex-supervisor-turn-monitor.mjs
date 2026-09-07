@@ -27,6 +27,7 @@ const source = process.env.CODEX_SUPERVISOR_SOURCE || "/workspace/codex-account-
 const config = process.env.CODEX_SUPERVISOR_CONFIG || "/home/codex/.codex-supervisor/config.toml";
 const python = process.env.CODEX_SUPERVISOR_PYTHON || "python3";
 const pollMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_POLL_MS || 5000);
+const resyncMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_RESYNC_MS || 30000);
 const heartbeatMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_HEARTBEAT_MS || 5000);
 const endpoint = `ws+unix://${socketPath}:/`;
 
@@ -37,9 +38,11 @@ let activeTurns = new Map();
 let knownThreads = new Set();
 let reconnectTimer;
 let pollTimer;
+let resyncTimer;
 let heartbeatTimer;
 let shuttingDown = false;
 let reconnectDelay = 1000;
+let resyncInFlight = false;
 
 function log(message) {
   process.stderr.write(`[codex-supervisor-turn-monitor] ${message}\n`);
@@ -111,7 +114,7 @@ function resolvePending(error) {
   pending.clear();
 }
 
-async function resumeThread(threadId) {
+async function resumeThread(threadId, targetTurns = activeTurns) {
   const response = await request("thread/resume", {
     threadId,
     excludeTurns: true,
@@ -123,46 +126,58 @@ async function resumeThread(threadId) {
     : Array.isArray(thread.turns) ? thread.turns : [];
   const active = [...turns].reverse().find(isActiveTurn);
   const runningKey = `status:${threadId}`;
-  for (const key of [...activeTurns.keys()]) {
-    if (key === runningKey || (active && key !== active.id && activeTurns.get(key)?.threadId === threadId)) activeTurns.delete(key);
+  const retainedKey = active?.id || (isRunningStatus(thread.status) ? runningKey : null);
+  // Reconciliation must remove stale turn IDs even when the latest thread
+  // snapshot is terminal. The old implementation only deleted them when a
+  // new active turn was found, which could keep DRAIN permanently active after
+  // a terminal event was missed during a Relay reconnect.
+  for (const [key, value] of [...targetTurns.entries()]) {
+    if (value?.threadId === threadId && key !== retainedKey) targetTurns.delete(key);
   }
-  if (active?.id) activeTurns.set(active.id, { threadId });
-  else if (isRunningStatus(thread.status)) activeTurns.set(runningKey, { threadId });
+  if (active?.id) targetTurns.set(active.id, { threadId });
+  else if (isRunningStatus(thread.status)) targetTurns.set(runningKey, { threadId });
 }
 
 async function resync() {
-  setUnknown();
-  activeTurns.clear();
-  knownThreads.clear();
-  const listed = await request("thread/list", {
-    archived: false,
-    limit: 120,
-    sortDirection: "desc",
-    sortKey: "recency_at",
-    sourceKinds: ["cli", "vscode", "exec", "appServer"],
-  });
-  const threads = Array.isArray(listed?.data) ? listed.data : [];
-  let failures = 0;
-  for (const thread of threads) {
-    const threadId = typeof thread?.id === "string"
-      ? thread.id
-      : typeof thread?.threadId === "string" ? thread.threadId : "";
-    if (!threadId) continue;
-    knownThreads.add(threadId);
-    try {
-      await resumeThread(threadId);
-    } catch {
-      failures += 1;
+  if (resyncInFlight) return false;
+  resyncInFlight = true;
+  const nextTurns = new Map();
+  const nextThreads = new Set();
+  try {
+    const listed = await request("thread/list", {
+      archived: false,
+      limit: 120,
+      sortDirection: "desc",
+      sortKey: "recency_at",
+      sourceKinds: ["cli", "vscode", "exec", "appServer"],
+    });
+    const threads = Array.isArray(listed?.data) ? listed.data : [];
+    let failures = 0;
+    for (const thread of threads) {
+      const threadId = typeof thread?.id === "string"
+        ? thread.id
+        : typeof thread?.threadId === "string" ? thread.threadId : "";
+      if (!threadId) continue;
+      nextThreads.add(threadId);
+      try {
+        await resumeThread(threadId, nextTurns);
+      } catch {
+        failures += 1;
+      }
     }
+    if (failures > 0) {
+      setUnknown();
+      log(`resync_incomplete threads=${threads.length} failures=${failures}`);
+      return false;
+    }
+    activeTurns = nextTurns;
+    knownThreads = nextThreads;
+    const ok = syncActive();
+    log(`resync_ok threads=${threads.length} active=${activeTurns.size}`);
+    return ok;
+  } finally {
+    resyncInFlight = false;
   }
-  if (failures > 0) {
-    setUnknown();
-    log(`resync_incomplete threads=${threads.length} failures=${failures}`);
-    return false;
-  }
-  const ok = syncActive();
-  log(`resync_ok threads=${threads.length} active=${activeTurns.size}`);
-  return ok;
 }
 
 async function discoverNewThreads() {
@@ -292,6 +307,11 @@ async function start() {
     scheduleReconnect();
   }
   pollTimer = setInterval(() => discoverNewThreads().catch(() => setUnknown()), pollMs);
+  // Events are normally sufficient, but periodic authoritative reconciliation
+  // repairs missed terminal events and stale active-turn entries after a
+  // Relay/app-server reconnect. It does not mark UNKNOWN during a successful
+  // scan, avoiding a transient false drain failure.
+  resyncTimer = setInterval(() => resync().catch(() => setUnknown()), resyncMs);
   heartbeatTimer = setInterval(() => {
     if (socket?.readyState === WebSocket.OPEN) runSignal("heartbeat");
     else setUnknown();
@@ -302,6 +322,7 @@ async function stop() {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(pollTimer);
+  clearInterval(resyncTimer);
   clearInterval(heartbeatTimer);
   if (reconnectTimer) clearTimeout(reconnectTimer);
   setUnknown();

@@ -230,6 +230,51 @@ config after validating the current Codex CLI/Relay behavior. If resume is
 rejected immediately, the hook falls back to a new thread with the continuation
 packet. The supervisor no longer marks the original thread dead in this mode.
 
+The turn monitor performs a full authoritative `thread/list`/`thread/resume`
+reconciliation every 30 seconds in addition to live events. This repairs stale
+active-turn entries when Relay reconnects while a terminal event is missed. A
+fresh app-server observer that still sees a real active turn is allowed to drain
+past the nominal 60-second timeout; the switch waits for that turn to reach a
+terminal state instead of aborting it or tripping the circuit breaker. If the
+observer becomes stale or the scan fails, the supervisor remains conservative
+and does not switch blindly.
+
+### What the operator sees during a switch
+
+In a foreground `codex` CLI attached to the shared Relay, the current turn is
+allowed to finish. During the short Relay stop/start window the CLI may report a
+closed connection, reconnect message, or return to its prompt. Do not start a
+second app-server and do not immediately run another `resume`: that can create
+two writers for the same thread. Wait until the supervisor is back in `WATCH`
+and Relay is healthy:
+
+```bash
+docker exec codex python3 -m codex_account_supervisor status \
+  --config /home/codex/.codex-supervisor/config.toml
+```
+
+If the handoff hook was enabled, inspect or attach to the detached continuation
+session after the switch:
+
+```bash
+docker exec codex tmux list-sessions
+docker exec -it codex tmux attach-session -t codex-handoff-<handoff-id-prefix>
+```
+
+If no handoff session exists, resume manually only after Relay is healthy:
+
+```bash
+docker exec -it codex codex resume --remote unix:// <THREAD_ID>
+```
+
+For a background task, automatic continuation works when the task belongs to a
+thread visible through the shared app-server and the handoff hook is healthy. The
+hook first resumes that thread on the new account; if the CLI rejects an
+immediate cross-account resume, it starts a new detached thread with the
+continuation packet. If the thread is not observable, the hook fails, or health
+checks do not converge, the supervisor enters `CIRCUIT_BROKEN` and leaves the
+packet for manual recovery instead of claiming the task continued.
+
 The mobile client itself may briefly reconnect while Relay restarts. Its thread
 history remains the same local app-server rollout; the monitor does not need
 mobile pairing tokens and never submits a prompt through the mobile API.
