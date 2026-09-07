@@ -93,9 +93,20 @@ fi
 # switching daemon. The account supervisor remains the sole switch owner.
 if [ -x /usr/local/bin/codex-warmup-scheduler ] && \
    [ -x /home/codex/.local/bin/codex-switch ]; then
-  if [ -f "${WARMUP_SCHEDULER_PID}" ] && kill -0 "$(cat "${WARMUP_SCHEDULER_PID}")" 2>/dev/null; then
-    true
-  else
+  WARMUP_RUNNING=0
+  if [ -f "${WARMUP_SCHEDULER_PID}" ]; then
+    WARMUP_PID_VALUE=$(cat "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true)
+    case "${WARMUP_PID_VALUE}" in
+      (''|*[!0-9]*) ;;
+      (*)
+        WARMUP_PID_STATE=$(awk '/^State:/{print $2; exit}' "/proc/${WARMUP_PID_VALUE}/status" 2>/dev/null || true)
+        if [ "${WARMUP_PID_STATE}" != "Z" ] && kill -0 "${WARMUP_PID_VALUE}" 2>/dev/null; then
+          WARMUP_RUNNING=1
+        fi
+        ;;
+    esac
+  fi
+  if [ "${WARMUP_RUNNING}" -eq 0 ]; then
     rm -f "${WARMUP_SCHEDULER_PID}"
     CODEX_WARMUP_TZ="${TZ:-Asia/Shanghai}" \
       setsid /usr/local/bin/codex-warmup-scheduler \
