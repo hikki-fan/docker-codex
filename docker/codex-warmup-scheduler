@@ -1,62 +1,293 @@
-#!/usr/bin/env bash
-set -u
+#!/usr/bin/env python3
+"""Run deterministic five-hour warmups for two Codex profiles.
 
-# Run quota warmup once during the configured local 07:00 hour. This is
-# intentionally separate from codex-switch's daemon: the account supervisor
-# owns profile switching, while this process only warms inactive windows.
-export PATH="/usr/local/bin:/home/codex/.local/bin:/usr/bin:/bin:${PATH:-}"
-export HOME="${HOME:-/home/codex}"
-export TZ="${CODEX_WARMUP_TZ:-Asia/Shanghai}"
+The schedule is a 120-hour (five-day) cycle. Account A runs at cycle offset
+0, then every five hours. Account B runs at the same cadence with a 150-minute
+offset. A small JSON state file makes retries idempotent across polling and
+container restarts; only the most recent missed slot is caught up.
 
-WARMUP_BIN="${CODEX_WARMUP_BIN:-/home/codex/.local/bin/codex-switch}"
-LOG_DIR="${CODEX_WARMUP_LOG_DIR:-/home/codex/.codex-switch/logs}"
-LOG_FILE="${CODEX_WARMUP_LOG_FILE:-${LOG_DIR}/warmup.log}"
-TARGET_HOUR="${CODEX_WARMUP_HOUR:-07}"
-POLL_SECONDS="${CODEX_WARMUP_POLL_SECONDS:-20}"
+No credentials or command output are written to the log. Profile aliases may
+be supplied with CODEX_WARMUP_A_ALIAS / CODEX_WARMUP_B_ALIAS. When omitted,
+the scheduler discovers profiles through ``codex-switch --json list`` and uses
+the first two aliases in sorted order.
+"""
 
-mkdir -p "${LOG_DIR}"
-chmod 700 "${LOG_DIR}" 2>/dev/null || true
+from __future__ import annotations
 
-log() {
-  printf '%s [warmup-scheduler] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$*" >>"${LOG_FILE}"
-}
+import json
+import os
+import re
+import subprocess
+import tempfile
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-run_warmup() {
-  if [ ! -x "${WARMUP_BIN}" ]; then
-    log "skipped: codex-switch not found at ${WARMUP_BIN}"
-    return 1
-  fi
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - production is POSIX Linux
+    fcntl = None
 
-  log "starting daily warmup"
-  "${WARMUP_BIN}" warmup --json >>"${LOG_FILE}" 2>&1
-  local exit_code=$?
-  if [ "${exit_code}" -eq 0 ]; then
-    log "daily warmup completed"
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python 3.11 is required in production
+    ZoneInfo = None  # type: ignore[assignment]
+
+
+SLOT_MINUTES = 5 * 60
+CYCLE_SLOTS = 5 * 24 * 60 // SLOT_MINUTES  # 24 slots in a 5-day cycle
+B_OFFSET_MINUTES = 150
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+
+WARMUP_BIN = Path(os.environ.get("CODEX_WARMUP_BIN", "/home/codex/.local/bin/codex-switch"))
+LOG_DIR = Path(os.environ.get("CODEX_WARMUP_LOG_DIR", "/home/codex/.codex-switch/logs"))
+LOG_FILE = Path(os.environ.get("CODEX_WARMUP_LOG_FILE", str(LOG_DIR / "warmup.log")))
+STATE_FILE = Path(
+    os.environ.get(
+        "CODEX_WARMUP_STATE_FILE",
+        "/home/codex/.codex-supervisor/warmup-scheduler.json",
+    )
+)
+POLL_SECONDS = float(os.environ.get("CODEX_WARMUP_POLL_SECONDS", "20"))
+TIMEZONE_NAME = os.environ.get("CODEX_WARMUP_TZ", DEFAULT_TIMEZONE)
+EPOCH_TEXT = os.environ.get("CODEX_WARMUP_EPOCH")
+NOW_OVERRIDE = os.environ.get("CODEX_WARMUP_NOW")
+
+
+def _redact(value: str) -> str:
+    """Remove common account/token-looking values from diagnostic text."""
+    value = re.sub(r"[\w.+-]+@[\w.-]+", "[REDACTED_EMAIL]", value)
+    return re.sub(
+        r"\b(sk|sess|tok|token)[-_A-Za-z0-9]{8,}\b",
+        "[REDACTED_TOKEN]",
+        value,
+        flags=re.I,
+    )[:240]
+
+
+def tz():
+    if ZoneInfo is None:
+        return datetime.now().astimezone().tzinfo
+    try:
+        return ZoneInfo(TIMEZONE_NAME)
+    except Exception:
+        # Avoid recursive logging here: log() itself needs tz().
+        return datetime.now().astimezone().tzinfo
+
+
+def log(message: str) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(LOG_FILE.parent, 0o700)
+    except OSError:
+        pass
+    with LOG_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f"{datetime.now(tz()).strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"[warmup-scheduler] {message}\n"
+        )
+    try:
+        os.chmod(LOG_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def parse_local_datetime(value: str) -> datetime:
+    raw = value.strip()
+    if len(raw) == 10:
+        raw += "T00:00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz())
+    return parsed.astimezone(tz())
+
+
+def now() -> datetime:
+    if NOW_OVERRIDE:
+        return parse_local_datetime(NOW_OVERRIDE)
+    return datetime.now(tz())
+
+
+def initial_state() -> Dict[str, Any]:
+    # Without an explicit anchor, make the first local calendar day day 1 and
+    # persist it. Subsequent restarts therefore keep the same five-day cycle.
+    epoch = EPOCH_TEXT or now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    return {"version": 1, "epoch": epoch, "last_slot": {"A": -1, "B": -1}}
+
+
+def load_state() -> Dict[str, Any]:
+    if not STATE_FILE.exists():
+        return initial_state()
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("state is not an object")
+        last_slot = data.get("last_slot")
+        if not isinstance(last_slot, dict):
+            last_slot = {}
+        return {
+            "version": 1,
+            "epoch": str(data.get("epoch") or initial_state()["epoch"]),
+            "last_slot": {
+                "A": int(last_slot.get("A", -1)),
+                "B": int(last_slot.get("B", -1)),
+            },
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        log(f"state unreadable; starting conservatively: {_redact(str(exc))}")
+        return initial_state()
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(STATE_FILE.parent, 0o700)
+    except OSError:
+        pass
+    fd, name = tempfile.mkstemp(prefix="warmup-", suffix=".tmp", dir=str(STATE_FILE.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
+
+
+def discover_aliases() -> Optional[Dict[str, str]]:
+    explicit_a = os.environ.get("CODEX_WARMUP_A_ALIAS", "").strip()
+    explicit_b = os.environ.get("CODEX_WARMUP_B_ALIAS", "").strip()
+    if explicit_a or explicit_b:
+        if not (explicit_a and explicit_b):
+            log("skipped: both CODEX_WARMUP_A_ALIAS and CODEX_WARMUP_B_ALIAS are required")
+            return None
+        return {"A": explicit_a, "B": explicit_b}
+
+    try:
+        result = subprocess.run(
+            [str(WARMUP_BIN), "--json", "list"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        data = json.loads(result.stdout)
+        profiles = data.get("profiles", []) if isinstance(data, dict) else []
+        aliases = sorted(
+            {
+                str(item.get("alias", "")).strip()
+                for item in profiles
+                if isinstance(item, dict) and item.get("alias")
+            }
+        )
+        if result.returncode != 0 or len(aliases) < 2:
+            log(f"skipped: discovered {len(aliases)} usable profiles")
+            return None
+        return {"A": aliases[0], "B": aliases[1]}
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        log(f"skipped: profile discovery failed: {_redact(str(exc))}")
+        return None
+
+
+def due_slot(current: datetime, epoch: datetime, offset_minutes: int) -> int:
+    elapsed = (
+        current.timestamp()
+        - (epoch + timedelta(minutes=offset_minutes)).timestamp()
+    ) / 60
+    return int(elapsed // SLOT_MINUTES)
+
+
+def run_account(account: str, alias: str, slot: int) -> bool:
+    if not WARMUP_BIN.is_file() or not os.access(WARMUP_BIN, os.X_OK):
+        log(f"account={account} slot={slot} skipped: codex-switch is unavailable")
+        return False
+    result = subprocess.run(
+        [str(WARMUP_BIN), "warmup", "--json", alias],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    if result.returncode == 0:
+        log(f"account={account} slot={slot} warmup completed")
+        return True
+    detail = _redact((result.stderr or result.stdout or "").strip())
+    log(
+        f"account={account} slot={slot} warmup failed "
+        f"exit_code={result.returncode} detail={detail}"
+    )
+    return False
+
+
+def run_once() -> int:
+    current = now()
+    state = load_state()
+    epoch = parse_local_datetime(state.get("epoch", EPOCH_TEXT))
+    aliases = discover_aliases()
+    if not aliases:
+        return 0
+
+    offsets = {"A": 0, "B": B_OFFSET_MINUTES}
+    for account in ("A", "B"):
+        slot = due_slot(current, epoch, offsets[account])
+        if slot < 0 or slot <= int(state["last_slot"].get(account, -1)):
+            continue
+        # If the scheduler was down, run only the latest due slot instead of
+        # bursting every missed request at once. This preserves the cadence.
+        # Mark the slot before invoking the command. A failed command is still
+        # one scheduled attempt; retrying every poll would violate the strict
+        # five-hour cadence and could hammer the provider.
+        state["last_slot"][account] = slot
+        save_state(state)
+        run_account(account, aliases[account], slot)
     return 0
-  fi
 
-  log "daily warmup failed exit_code=${exit_code}"
-  return "${exit_code}"
-}
 
-# A one-shot mode makes the scheduler safely testable without waiting for the
-# wall clock. It is not enabled by the container startup script.
-if [ "${CODEX_WARMUP_ONCE:-0}" = "1" ]; then
-  run_warmup
-  exit $?
-fi
+def acquire_singleton_lock():
+    """Keep overlapping startup hooks from issuing duplicate warmups."""
+    if fcntl is None:
+        return None
+    lock_path = STATE_FILE.with_suffix(STATE_FILE.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return False
+    try:
+        os.chmod(lock_path, 0o600)
+    except OSError:
+        pass
+    return handle
 
-last_run_date=""
-while :; do
-  local_date="$(date +%F)"
-  local_hour="$(date +%H)"
 
-  # Use the whole 07:00 hour as a small tolerance window for startup and
-  # scheduler jitter, while still running at most once per local calendar day.
-  if [ "${local_hour}" = "${TARGET_HOUR}" ] && [ "${last_run_date}" != "${local_date}" ]; then
-    run_warmup || true
-    last_run_date="${local_date}"
-  fi
+def main() -> int:
+    singleton = acquire_singleton_lock()
+    if singleton is False:
+        return 0
+    if os.environ.get("CODEX_WARMUP_ONCE") == "1":
+        return run_once()
 
-  sleep "${POLL_SECONDS}"
-done
+    log(
+        f"started timezone={TIMEZONE_NAME} epoch={EPOCH_TEXT or 'first-local-day'} "
+        "cycle=5d cadence=5h account_offset=150m"
+    )
+    while True:
+        try:
+            run_once()
+        except Exception as exc:  # keep the daemon alive and fail closed
+            log(f"iteration failed: {_redact(str(exc))}")
+        time.sleep(max(1.0, POLL_SECONDS))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

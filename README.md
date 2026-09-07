@@ -234,12 +234,22 @@ The mobile client itself may briefly reconnect while Relay restarts. Its thread
 history remains the same local app-server rollout; the monitor does not need
 mobile pairing tokens and never submits a prompt through the mobile API.
 
-The startup script also runs a small `codex-warmup-scheduler`. It executes
-`codex-switch warmup --json` once during the 07:00 hour in `Asia/Shanghai` and
-writes its result to `/home/codex/.codex-switch/logs/warmup.log`. It does not
-start `codex-switch daemon` or switch profiles; the account supervisor remains
-the only component that can switch accounts. Set `CODEX_WARMUP_TZ` or
-`CODEX_WARMUP_HOUR` only when the deployment uses a different local schedule.
+The startup script also runs `codex-warmup-scheduler`. It executes one targeted
+`codex-switch warmup --json <alias>` attempt for each account every five hours.
+The schedule is a deterministic five-day cycle: account A starts at day 1
+00:00, then repeats every five hours; account B uses the same cadence starting
+150 minutes later. Therefore day 5 ends at A 19:00 / B 21:30 and day 6 returns
+to day 1. The scheduler persists its last scheduled slot and prevents
+duplicates after polling or restart. It writes only redacted status lines to
+`/home/codex/.codex-switch/logs/warmup.log`.
+
+By default it discovers the two profiles and assigns the first two aliases in
+sorted order to A/B. To pin the mapping and cycle anchor, set
+`CODEX_WARMUP_A_ALIAS`, `CODEX_WARMUP_B_ALIAS`, and
+`CODEX_WARMUP_EPOCH=YYYY-MM-DDTHH:MM:SS` (local `CODEX_WARMUP_TZ`, default
+`Asia/Shanghai`). If no epoch is supplied, the first local calendar day after
+startup is persisted as day 1. The `codex-switch` daemon remains disabled; the account
+supervisor is still the only component allowed to switch accounts.
 
 Inspect the live integration without exposing credentials:
 
