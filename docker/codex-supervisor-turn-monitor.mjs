@@ -28,6 +28,7 @@ const config = process.env.CODEX_SUPERVISOR_CONFIG || "/home/codex/.codex-superv
 const python = process.env.CODEX_SUPERVISOR_PYTHON || "python3";
 const pollMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_POLL_MS || 5000);
 const resyncMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_RESYNC_MS || 30000);
+const requestTimeoutMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_REQUEST_TIMEOUT_MS || 5000);
 const heartbeatMs = Number(process.env.CODEX_SUPERVISOR_MONITOR_HEARTBEAT_MS || 5000);
 const endpoint = `ws+unix://${socketPath}:/`;
 
@@ -98,6 +99,15 @@ function isRunningStatus(status) {
   return ["active", "running", "inprogress"].includes(value.toLowerCase().replace(/[^a-z0-9]/g, ""));
 }
 
+function isNonRunningStatus(status) {
+  const value = typeof status === "string"
+    ? status
+    : status && typeof status === "object" && "type" in status
+      ? String(status.type)
+      : "";
+  return ["idle", "notloaded"].includes(value.toLowerCase().replace(/[^a-z0-9]/g, ""));
+}
+
 function isActiveWriterError(error) {
   const message = String(error?.message || error || "").toLowerCase();
   return message.includes("already has an active writer") || message.includes("active writer");
@@ -107,9 +117,30 @@ function request(method, params) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("socket unavailable"));
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    let timeout;
+    const settle = {
+      resolve: (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    };
+    pending.set(id, settle);
+    timeout = setTimeout(() => {
+      const item = pending.get(id);
+      if (!item) return;
+      pending.delete(id);
+      item.reject(new Error(`app-server request timed out: ${method}`));
+    }, requestTimeoutMs);
     socket.send(JSON.stringify({ id, method, params }), (error) => {
-      if (error && pending.delete(id)) reject(error);
+      if (!error) return;
+      const item = pending.get(id);
+      if (!item) return;
+      pending.delete(id);
+      item.reject(error);
     });
   });
 }
@@ -119,7 +150,7 @@ function resolvePending(error) {
   pending.clear();
 }
 
-async function resumeThread(threadId, targetTurns = activeTurns) {
+async function resumeThread(threadId, targetTurns = activeTurns, listedThread = null) {
   const response = await request("thread/resume", {
     threadId,
     excludeTurns: true,
@@ -164,15 +195,21 @@ async function resync() {
         : typeof thread?.threadId === "string" ? thread.threadId : "";
       if (!threadId) continue;
       nextThreads.add(threadId);
+      // Idle and notLoaded entries cannot contain a live turn. Avoid
+      // needlessly resuming every historical thread on each 30-second scan;
+      // this also avoids active-writer locks held by an idle foreground CLI.
+      if (isNonRunningStatus(thread.status)) continue;
       try {
-        await resumeThread(threadId, nextTurns);
+        await resumeThread(threadId, nextTurns, thread);
       } catch (error) {
         // An active writer prevents a read-only thread/resume, but it is
-        // itself authoritative evidence that the thread must remain in
-        // DRAIN. Treat it as an active status rather than poisoning an
-        // otherwise complete reconciliation with UNKNOWN.
+        // only a turn blocker when the authoritative list also reports a
+        // running status. An idle/notLoaded writer is a client lock, not an
+        // in-flight turn, so do not poison the reconciliation with UNKNOWN.
         if (isActiveWriterError(error)) {
-          nextTurns.set(`status:${threadId}`, { threadId });
+          if (isRunningStatus(listedThread?.status)) {
+            nextTurns.set(`status:${threadId}`, { threadId });
+          }
         } else {
           failures += 1;
         }
@@ -209,12 +246,15 @@ async function discoverNewThreads() {
       : typeof thread?.threadId === "string" ? thread.threadId : "";
     if (!threadId || knownThreads.has(threadId)) continue;
     knownThreads.add(threadId);
+    if (isNonRunningStatus(thread.status)) continue;
     try {
-      await resumeThread(threadId);
+      await resumeThread(threadId, activeTurns, thread);
       syncActive();
     } catch (error) {
       if (isActiveWriterError(error)) {
-        activeTurns.set(`status:${threadId}`, { threadId });
+        if (isRunningStatus(thread?.status)) {
+          activeTurns.set(`status:${threadId}`, { threadId });
+        }
         syncActive();
       } else {
         setUnknown();
