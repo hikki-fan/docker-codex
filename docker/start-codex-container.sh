@@ -59,6 +59,23 @@ pid_is_live() {
   [ "${state}" != "Z" ] && kill -0 "${candidate}" 2>/dev/null
 }
 
+# A PID file can outlive its process, and Linux may reuse the number for an
+# unrelated process or for a thread of another process.  Check the command
+# line as well as liveness before treating a persisted owner as running.
+pid_is_expected() {
+  local candidate="$1"
+  local expected="$2"
+  local command_line
+
+  pid_is_live "${candidate}" || return 1
+  [ -r "/proc/${candidate}/cmdline" ] || return 1
+  command_line=$(tr '\0' ' ' < "/proc/${candidate}/cmdline" 2>/dev/null || true)
+  case "${command_line}" in
+    *"${expected}"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Never overwrite an operator's persistent config.  The shipped file is a
 # conservative default (98% used threshold and explicit idle signal required).
 if [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/config.toml ]; then
@@ -66,7 +83,8 @@ if [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/con
 fi
 
 if [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
-  if [ -f "${SUPERVISOR_PID}" ] && pid_is_live "$(cat "${SUPERVISOR_PID}" 2>/dev/null || true)"; then
+  if [ -f "${SUPERVISOR_PID}" ] && \
+     pid_is_expected "$(cat "${SUPERVISOR_PID}" 2>/dev/null || true)" "codex_account_supervisor"; then
     : # An already-running instance owns the lock; do not create a duplicate.
     true
   else
@@ -87,7 +105,8 @@ fi
 # until a fresh snapshot is available.
 if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
    [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
-  if [ -f "${TURN_MONITOR_PID}" ] && pid_is_live "$(cat "${TURN_MONITOR_PID}" 2>/dev/null || true)"; then
+  if [ -f "${TURN_MONITOR_PID}" ] && \
+     pid_is_expected "$(cat "${TURN_MONITOR_PID}" 2>/dev/null || true)" "codex-supervisor-turn-monitor.mjs"; then
     true
   else
     rm -f "${TURN_MONITOR_PID}"
@@ -104,20 +123,9 @@ fi
 # switching daemon. The account supervisor remains the sole switch owner.
 if [ -x /usr/local/bin/codex-warmup-scheduler ] && \
    [ -x /home/codex/.local/bin/codex-switch ]; then
-  WARMUP_RUNNING=0
-  if [ -f "${WARMUP_SCHEDULER_PID}" ]; then
-    WARMUP_PID_VALUE=$(cat "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true)
-    case "${WARMUP_PID_VALUE}" in
-      (''|*[!0-9]*) ;;
-      (*)
-        WARMUP_PID_STATE=$(awk '/^State:/{print $2; exit}' "/proc/${WARMUP_PID_VALUE}/status" 2>/dev/null || true)
-        if [ "${WARMUP_PID_STATE}" != "Z" ] && kill -0 "${WARMUP_PID_VALUE}" 2>/dev/null; then
-          WARMUP_RUNNING=1
-        fi
-        ;;
-    esac
-  fi
-  if [ "${WARMUP_RUNNING}" -eq 0 ]; then
+  if ! [ -f "${WARMUP_SCHEDULER_PID}" ] || \
+     ! pid_is_expected "$(cat "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true)" \
+       "codex-warmup-scheduler"; then
     rm -f "${WARMUP_SCHEDULER_PID}"
     CODEX_WARMUP_TZ="${TZ:-Asia/Shanghai}" \
       setsid /usr/local/bin/codex-warmup-scheduler \
