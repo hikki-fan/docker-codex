@@ -98,6 +98,11 @@ function isRunningStatus(status) {
   return ["active", "running", "inprogress"].includes(value.toLowerCase().replace(/[^a-z0-9]/g, ""));
 }
 
+function isActiveWriterError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("already has an active writer") || message.includes("active writer");
+}
+
 function request(method, params) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("socket unavailable"));
   const id = nextId++;
@@ -161,8 +166,16 @@ async function resync() {
       nextThreads.add(threadId);
       try {
         await resumeThread(threadId, nextTurns);
-      } catch {
-        failures += 1;
+      } catch (error) {
+        // An active writer prevents a read-only thread/resume, but it is
+        // itself authoritative evidence that the thread must remain in
+        // DRAIN. Treat it as an active status rather than poisoning an
+        // otherwise complete reconciliation with UNKNOWN.
+        if (isActiveWriterError(error)) {
+          nextTurns.set(`status:${threadId}`, { threadId });
+        } else {
+          failures += 1;
+        }
       }
     }
     if (failures > 0) {
@@ -199,9 +212,14 @@ async function discoverNewThreads() {
     try {
       await resumeThread(threadId);
       syncActive();
-    } catch {
-      setUnknown();
-      log("new_thread_resubscribe_failed");
+    } catch (error) {
+      if (isActiveWriterError(error)) {
+        activeTurns.set(`status:${threadId}`, { threadId });
+        syncActive();
+      } else {
+        setUnknown();
+        log("new_thread_resubscribe_failed");
+      }
     }
   }
 }
