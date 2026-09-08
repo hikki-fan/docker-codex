@@ -6,16 +6,17 @@ target_max_used_percent = 98.0
 check_interval_seconds = 30.0
 cooldown_seconds = 300.0
 
-# A cutover is allowed only after a client records the current turn as idle.
-# This prevents a Relay/mobile request from being interrupted mid-turn.
+# 5h used >= threshold hard-stops the shared app-server and switches
+# immediately. In-flight turns are dropped so credits are not used as overflow.
 drain_timeout_seconds = 60.0
 drain_poll_interval_seconds = 2.0
 require_explicit_idle = true
 turn_signal_stale_seconds = 30.0
-# The shared app-server observer verifies that Relay/mobile/TUI turns are
-# idle before switching.  The handoff hook first attempts to resume the same
-# local rollout on the new account and falls back to a new thread only if the
-# installed Codex version rejects that resume.
+preempt_in_flight_turns = true
+halt_relay_when_exhausted = true
+# The handoff hook first attempts to resume the same local rollout on the
+# new account and falls back to a new thread only if the installed Codex
+# version rejects that resume.
 cross_account_resume = true
 
 max_consecutive_failures = 3

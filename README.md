@@ -197,8 +197,11 @@ The startup script then automatically:
 
 1. Stops `codex-switch`'s background daemon so it cannot race the supervisor.
 2. Starts one supervisor instance with a 98% *used* quota threshold. A target
-   is eligible only while its own 5-hour usage is strictly below 98%; if every
-   account is at or above 98%, the supervisor pauses without switching.
+   is eligible only while its own 5-hour usage is strictly below 98%. Hitting
+   the threshold hard-stops the shared app-server and switches immediately,
+   even if a turn is still running or the current account still has credits.
+   If every account is at or above 98%, the supervisor pauses and stops Relay
+   so credits are not burned as 5h overflow.
 3. Uses the official Relay PID file and `codex-relay stop`/`--bg --shared-app-server`.
 4. Keeps state, locks, handoff packets, and logs under
    `/home/codex/.codex-supervisor` (the persistent `/home/codex` mount).
@@ -209,9 +212,10 @@ shared Unix app-server, resumes/listens to known threads, and records
 traffic. If the socket or a thread resync fails, it records `UNKNOWN`; the
 supervisor then refuses to switch until a fresh snapshot is available.
 
-The supervisor still requires an explicit idle state before switching accounts,
-but the monitor supplies that state automatically. A manual/client integration
-can also record a turn boundary with:
+The supervisor hard-preempts at the 5h threshold: it does not wait for the
+current turn to become idle. The monitor still records turn boundaries so
+handoff can capture the thread ID. A manual/client integration can also
+record a turn boundary with:
 
 ```bash
 PYTHONPATH=/workspace/codex-account-supervisor \
@@ -232,21 +236,20 @@ packet. The supervisor no longer marks the original thread dead in this mode.
 
 The turn monitor performs a full authoritative `thread/list`/`thread/resume`
 reconciliation every 30 seconds in addition to live events. This repairs stale
-active-turn entries when Relay reconnects while a terminal event is missed. A
-fresh app-server observer that still sees a real active turn is allowed to drain
-past the nominal 60-second timeout; the switch waits for that turn to reach a
-terminal state instead of aborting it or tripping the circuit breaker. If the
-observer becomes stale or the scan fails, the supervisor remains conservative
-and does not switch blindly.
+active-turn entries when Relay reconnects while a terminal event is missed.
+With `preempt_in_flight_turns = true` (the container default), a live observer
+turn does **not** delay cutover: Relay is stopped, the turn is dropped, and
+the other account is used. Set that flag to false only if you need the older
+drain-until-idle behavior.
 
 ### What the operator sees during a switch
 
 In a foreground `codex` CLI attached to the shared Relay, the current turn is
-allowed to finish. During the short Relay stop/start window the CLI may report a
-closed connection, reconnect message, or return to its prompt. Do not start a
-second app-server and do not immediately run another `resume`: that can create
-two writers for the same thread. Wait until the supervisor is back in `WATCH`
-and Relay is healthy:
+aborted when the 5h threshold is reached. During the Relay stop/start window
+the CLI may report a closed connection, reconnect message, or return to its
+prompt. Do not start a second app-server and do not immediately run another
+`resume`: that can create two writers for the same thread. Wait until the
+supervisor is back in `WATCH` and Relay is healthy:
 
 ```bash
 docker exec codex python3 -m codex_account_supervisor status \
