@@ -207,7 +207,7 @@ async function resync() {
         // running status. An idle/notLoaded writer is a client lock, not an
         // in-flight turn, so do not poison the reconciliation with UNKNOWN.
         if (isActiveWriterError(error)) {
-          if (isRunningStatus(listedThread?.status)) {
+          if (isRunningStatus(thread?.status)) {
             nextTurns.set(`status:${threadId}`, { threadId });
           }
         } else {

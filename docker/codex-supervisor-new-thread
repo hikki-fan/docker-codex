@@ -2,8 +2,8 @@
 """Launch a supervisor continuation packet in a detached tmux Codex client.
 
 The supervisor calls this hook only after a successful account cutover and
-Relay health check.  Depending on the configured flag, the runner first tries
-the original thread ID on the new account and falls back to a new thread.  The
+Relay health check. The runner always starts a fresh thread: the original
+thread is account-bound and cannot be resumed after a profile switch. The
 packet contains workspace/task metadata, never credentials or transcripts.
 This hook deliberately passes only a generated packet path to tmux; the runner
 reads the prompt and uses argv, avoiding shell interpolation of prompt text.
@@ -30,7 +30,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume-existing",
         action="store_true",
-        help="Ask the runner to resume the packet's original thread before falling back",
+        help="Legacy compatibility flag; cross-account handoff still starts a fresh thread",
     )
     return parser.parse_args()
 

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Resume or start Codex for a validated continuation packet."""
+"""Start Codex for a validated cross-account continuation packet.
+
+The old app-server thread belongs to the account that was just cut over and
+cannot be resumed under the replacement account. ``--resume-existing`` is
+kept as a backwards-compatible flag for older launchers, but it intentionally
+does not call ``codex resume`` anymore.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import sys
-import subprocess
-import time
 import argparse
 from pathlib import Path
 
@@ -44,24 +48,21 @@ def main() -> int:
         return fail("codex-real executable is not installed")
     os.chdir(workspace)
 
-    # Resume uses the same local rollout ID after a verified account switch.
-    # The installed CLI may reject that operation; only an early startup
-    # failure is eligible for the new-thread fallback.  A normal user exit
-    # after a long-running TUI must never create a duplicate thread.
-    thread_id = str(packet.get("dead_thread_id") or "").strip()
-    if args.resume_existing and thread_id:
-        started = time.monotonic()
-        resumed = subprocess.run(
-            [codex, "resume", "--remote", "unix://", "--no-alt-screen", "-C", str(workspace), thread_id, prompt],
-            cwd=str(workspace),
-            check=False,
-        )
-        if resumed.returncode == 0:
-            return 0
-        if time.monotonic() - started > 30.0:
-            return resumed.returncode
+    # A Codex rollout is account-bound. Reusing its ID after codex-switch
+    # changes credentials causes the TUI to enter an endless reconnect loop
+    # ("app-server session could not be restored"). Always create a fresh
+    # thread and carry the continuation instructions into it instead.
+    old_thread_id = str(packet.get("dead_thread_id") or "").strip()
+    continuation = (
+        "账号切换已完成。原账号线程已因额度阈值被硬中断；当前是新账号下的新线程。"
+        "请继续执行切换前尚未完成的用户任务。先检查当前工作区、相关进程和已有改动，"
+        "避免重复已经完成的操作；不要只回复确认，直接继续执行并报告进展及剩余事项。"
+    )
+    if old_thread_id:
+        continuation += f"原线程标识（仅供审计，不要尝试 resume）：{old_thread_id}。"
+    continuation += "\n\n" + prompt
 
-    os.execv(codex, [codex, "--remote", "unix://", "--no-alt-screen", "-C", str(workspace), prompt])
+    os.execv(codex, [codex, "--remote", "unix://", "--no-alt-screen", "-C", str(workspace), continuation])
     return 0
 
 
