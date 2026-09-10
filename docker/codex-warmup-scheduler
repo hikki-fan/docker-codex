@@ -58,11 +58,21 @@ NOW_OVERRIDE = os.environ.get("CODEX_WARMUP_NOW")
 def _redact(value: str) -> str:
     """Remove common account/token-looking values from diagnostic text."""
     value = re.sub(r"[\w.+-]+@[\w.-]+", "[REDACTED_EMAIL]", value)
-    return re.sub(
+    value = re.sub(
         r"\b(sk|sess|tok|token)[-_A-Za-z0-9]{8,}\b",
         "[REDACTED_TOKEN]",
         value,
         flags=re.I,
+    )
+    value = re.sub(
+        r"\beyJ[A-Za-z0-9._-]{16,}\b",
+        "[REDACTED_JWT]",
+        value,
+    )
+    return re.sub(
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*",
+        "Bearer [REDACTED_TOKEN]",
+        value,
     )[:240]
 
 
@@ -162,23 +172,29 @@ def save_state(state: Dict[str, Any]) -> None:
         raise
 
 
-def discover_aliases() -> Optional[Dict[str, str]]:
+def refresh_and_discover_aliases() -> Optional[Dict[str, str]]:
     explicit_a = os.environ.get("CODEX_WARMUP_A_ALIAS", "").strip()
     explicit_b = os.environ.get("CODEX_WARMUP_B_ALIAS", "").strip()
     if explicit_a or explicit_b:
         if not (explicit_a and explicit_b):
-            log("skipped: both CODEX_WARMUP_A_ALIAS and CODEX_WARMUP_B_ALIAS are required")
+            log("failed: both CODEX_WARMUP_A_ALIAS and CODEX_WARMUP_B_ALIAS are required")
             return None
-        return {"A": explicit_a, "B": explicit_b}
 
     try:
         result = subprocess.run(
-            [str(WARMUP_BIN), "--json", "list"],
+            [str(WARMUP_BIN), "--json", "list", "--force"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=120,
             check=False,
         )
+        if result.returncode != 0:
+            detail = _redact((result.stderr or result.stdout or "").strip())
+            log(
+                "failed: forced profile refresh returned "
+                f"exit_code={result.returncode} detail={detail or 'no diagnostic output'}"
+            )
+            return None
         data = json.loads(result.stdout)
         profiles = data.get("profiles", []) if isinstance(data, dict) else []
         aliases = sorted(
@@ -188,12 +204,18 @@ def discover_aliases() -> Optional[Dict[str, str]]:
                 if isinstance(item, dict) and item.get("alias")
             }
         )
-        if result.returncode != 0 or len(aliases) < 2:
-            log(f"skipped: discovered {len(aliases)} usable profiles")
+        if explicit_a and explicit_b:
+            missing = sorted({explicit_a, explicit_b} - set(aliases))
+            if missing:
+                log(f"failed: {len(missing)} configured warmup profile(s) were not found")
+                return None
+            return {"A": explicit_a, "B": explicit_b}
+        if len(aliases) < 2:
+            log(f"failed: discovered {len(aliases)} usable profiles")
             return None
         return {"A": aliases[0], "B": aliases[1]}
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        log(f"skipped: profile discovery failed: {_redact(str(exc))}")
+        log(f"failed: forced profile refresh failed: {_redact(str(exc))}")
         return None
 
 
@@ -209,44 +231,116 @@ def run_account(account: str, alias: str, slot: int) -> bool:
     if not WARMUP_BIN.is_file() or not os.access(WARMUP_BIN, os.X_OK):
         log(f"account={account} slot={slot} skipped: codex-switch is unavailable")
         return False
-    result = subprocess.run(
-        [str(WARMUP_BIN), "warmup", "--json", alias],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
+    try:
+        result = subprocess.run(
+            [str(WARMUP_BIN), "warmup", "--json", alias],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"account={account} slot={slot} warmup failed detail=command timed out")
+        return False
+    except OSError as exc:
+        log(
+            f"account={account} slot={slot} warmup failed "
+            f"detail=unable to execute codex-switch: {_redact(str(exc))}"
+        )
+        return False
+
+    if result.returncode != 0:
+        detail = _redact((result.stderr or result.stdout or "").strip())
+        log(
+            f"account={account} slot={slot} warmup failed "
+            f"exit_code={result.returncode} detail={detail or 'no diagnostic output'}"
+        )
+        return False
+
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        log(
+            f"account={account} slot={slot} warmup failed "
+            f"detail=invalid JSON result: {_redact(str(exc))}"
+        )
+        return False
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    item = (
+        next(
+            (
+                entry
+                for entry in results
+                if isinstance(entry, dict) and entry.get("alias") == alias
+            ),
+            None,
+        )
+        if isinstance(results, list)
+        else None
     )
-    if result.returncode == 0:
-        log(f"account={account} slot={slot} warmup completed")
+    if not isinstance(payload, dict) or item is None:
+        log(
+            f"account={account} slot={slot} warmup failed "
+            "detail=missing result for target profile"
+        )
+        return False
+    if item.get("ok") is not True:
+        detail = _redact(str(item.get("error") or "profile result was not successful"))
+        log(f"account={account} slot={slot} warmup failed detail={detail}")
+        return False
+    if payload.get("ok") is not True:
+        detail = _redact(str(payload.get("error") or "overall result was not successful"))
+        log(f"account={account} slot={slot} warmup failed detail={detail}")
+        return False
+
+    skipped = item.get("skipped", False)
+    if skipped is True:
+        log(f"account={account} slot={slot} warmup skipped: active quota window")
         return True
-    detail = _redact((result.stderr or result.stdout or "").strip())
-    log(
-        f"account={account} slot={slot} warmup failed "
-        f"exit_code={result.returncode} detail={detail}"
-    )
-    return False
+    if skipped is not False:
+        log(
+            f"account={account} slot={slot} warmup failed "
+            "detail=invalid skipped flag in profile result"
+        )
+        return False
+
+    log(f"account={account} slot={slot} warmup completed")
+    return True
 
 
 def run_once() -> int:
     current = now()
     state = load_state()
     epoch = parse_local_datetime(state.get("epoch", EPOCH_TEXT))
-    aliases = discover_aliases()
-    if not aliases:
-        return 0
-
     offsets = {"A": 0, "B": B_OFFSET_MINUTES}
+    due: Dict[str, int] = {}
     for account in ("A", "B"):
         slot = due_slot(current, epoch, offsets[account])
         if slot < 0 or slot <= int(state["last_slot"].get(account, -1)):
             continue
+        due[account] = slot
+
+    # Do no network work during idle polls. When one or more slots are due,
+    # consume them before any subprocess call so a refresh or warmup failure
+    # cannot become a 20-second retry storm.
+    if not due:
+        return 0
+    for account, slot in due.items():
         # If the scheduler was down, run only the latest due slot instead of
         # bursting every missed request at once. This preserves the cadence.
         # Mark the slot before invoking the command. A failed command is still
         # one scheduled attempt; retrying every poll would violate the strict
         # five-hour cadence and could hammer the provider.
         state["last_slot"][account] = slot
-        save_state(state)
+    save_state(state)
+
+    # A forced usage refresh is required even when aliases are explicitly
+    # configured: codex-switch's warmup skip decision reads its usage cache.
+    aliases = refresh_and_discover_aliases()
+    if not aliases:
+        return 0
+    for account, slot in due.items():
         run_account(account, aliases[account], slot)
     return 0
 

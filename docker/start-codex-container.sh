@@ -119,8 +119,9 @@ if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
   fi
 fi
 
-# Warm quota windows once per day without enabling codex-switch's account
-# switching daemon. The account supervisor remains the sole switch owner.
+# Warm quota windows on the configured five-hour cadence without enabling
+# codex-switch's account-switching daemon. The account supervisor remains the
+# sole switch owner.
 if [ -x /usr/local/bin/codex-warmup-scheduler ] && \
    [ -x /home/codex/.local/bin/codex-switch ]; then
   if ! [ -f "${WARMUP_SCHEDULER_PID}" ] || \
