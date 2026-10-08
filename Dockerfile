@@ -3,6 +3,7 @@ FROM node:22-bookworm
 ARG CODEX_VERSION
 ARG CODEX_RELAY_VERSION=latest
 ARG AGY_VERSION=latest
+ARG VICOA_VERSION=1.9.10
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -77,6 +78,8 @@ RUN chmod +x \
       /usr/local/bin/codex-supervisor-turn-monitor.mjs \
       /usr/local/bin/codex-warmup-scheduler && \
     chmod 0644 /usr/local/share/codex-supervisor/config.toml
+
+RUN npm install -g @vicoa/cli@${VICOA_VERSION} && vicoa --version
 
 WORKDIR /workspace
 

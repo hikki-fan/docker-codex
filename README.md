@@ -2,7 +2,7 @@
 
 Build a personal Docker image for the OpenAI Codex CLI and Codex Relay, then publish it to Docker Hub.
 
-The image installs `@openai/codex`, `codex-relay`, Google Antigravity CLI (`agy`), GitHub CLI (`gh`), and common terminal tools. GitHub Actions checks the latest upstream versions every day and rebuilds the Docker image when Codex, Codex Relay, or Antigravity CLI changes.
+The image installs `@openai/codex`, `codex-relay`, Google Antigravity CLI (`agy`), GitHub CLI (`gh`), Vicoa CLI (`vicoa`, pinned to 1.9.10), and common terminal tools. GitHub Actions checks the latest upstream versions every day and rebuilds the Docker image when Codex, Codex Relay, or Antigravity CLI changes. Run `vicoa` in an interactive terminal to complete its own setup; installing it does not configure account access.
 
 It also includes common terminal tools and `bubblewrap` for sandbox support. The compose file grants the container the extra sandbox permissions bubblewrap needs inside Docker.
 
