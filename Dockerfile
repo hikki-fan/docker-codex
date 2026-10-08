@@ -11,6 +11,7 @@ ENV TZ=Asia/Shanghai
 ENV HOME=/home/codex
 ENV CODEX_VERSION=${CODEX_VERSION}
 ENV CODEX_RELAY_VERSION=${CODEX_RELAY_VERSION}
+ENV CODEX_BIN=/usr/local/bin/codex-real
 ENV PATH="/opt/codex/bin:/usr/local/bin:/home/codex/.local/bin:${PATH}"
 
 RUN apt update && \

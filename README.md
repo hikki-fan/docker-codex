@@ -173,6 +173,8 @@ The image puts the Codex wrapper at `/opt/codex/bin/codex`, ahead of npm's
 to the shared Unix socket even after an in-container npm upgrade. Login shells
 also restore this path through `/etc/profile.d/codex-path.sh`. Other Codex
 commands and explicitly supplied remote endpoints are passed through unchanged.
+`CODEX_BIN=/usr/local/bin/codex-real` also directs Relay to the image's installed
+CLI, so its bundled dependency cannot start an older app-server after upgrades.
 The explicit equivalent is:
 
 ```bash

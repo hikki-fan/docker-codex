@@ -2,6 +2,8 @@
 set -e
 
 export PATH="/opt/codex/bin:/usr/local/bin:/home/codex/.local/bin:${PATH}"
+# Relay bundles a CLI that may lag the image's globally installed version.
+export CODEX_BIN="${CODEX_BIN:-/usr/local/bin/codex-real}"
 
 # Keep Relay and terminal TUIs on the same app-server. Terminal sessions must
 # attach with `codex resume --remote unix:// [SESSION_ID]` instead of starting
