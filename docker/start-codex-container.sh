@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-export PATH="/usr/local/bin:/home/codex/.local/bin:${PATH}"
+export PATH="/opt/codex/bin:/usr/local/bin:/home/codex/.local/bin:${PATH}"
 
 # Keep Relay and terminal TUIs on the same app-server. Terminal sessions must
 # attach with `codex resume --remote unix:// [SESSION_ID]` instead of starting
@@ -99,11 +99,13 @@ else
   echo "codex-account-supervisor source not found; quota handoff supervisor is disabled" >&2
 fi
 
-# Observe the shared app-server's turn lifecycle.  This covers terminal Codex
-# and Relay/mobile turns without requiring mobile pairing credentials.  If the
-# observer disconnects it writes UNKNOWN, so the supervisor refuses a cutover
-# until a fresh snapshot is available.
-if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
+# Hard cutover is driven exclusively by account-global usage and does not need
+# thread/resume observation. Keep the legacy observer opt-in because attaching
+# it to every saved thread can itself become an active writer and interfere
+# with an operator's manual resume.
+TURN_MONITOR_ENABLED="${CODEX_SUPERVISOR_TURN_MONITOR_ENABLED:-false}"
+if [ "${TURN_MONITOR_ENABLED}" = "true" ] && \
+   [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
    [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
   if [ -f "${TURN_MONITOR_PID}" ] && \
      pid_is_expected "$(cat "${TURN_MONITOR_PID}" 2>/dev/null || true)" "codex-supervisor-turn-monitor.mjs"; then
@@ -117,6 +119,12 @@ if [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
     echo $! >"${TURN_MONITOR_PID}"
     chmod 600 "${TURN_MONITOR_PID}" 2>/dev/null || true
   fi
+elif [ -f "${TURN_MONITOR_PID}" ]; then
+  monitor_pid=$(cat "${TURN_MONITOR_PID}" 2>/dev/null || true)
+  if pid_is_expected "${monitor_pid}" "codex-supervisor-turn-monitor.mjs"; then
+    kill -TERM "${monitor_pid}" 2>/dev/null || true
+  fi
+  rm -f "${TURN_MONITOR_PID}"
 fi
 
 # Warm quota windows on the configured five-hour cadence without enabling

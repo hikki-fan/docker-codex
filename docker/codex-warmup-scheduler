@@ -54,6 +54,13 @@ TIMEZONE_NAME = os.environ.get("CODEX_WARMUP_TZ", DEFAULT_TIMEZONE)
 EPOCH_TEXT = os.environ.get("CODEX_WARMUP_EPOCH")
 NOW_OVERRIDE = os.environ.get("CODEX_WARMUP_NOW")
 
+DEFAULT_RETRY_DELAY_SECONDS = 60.0
+RETRY_DELAY_SECONDS = float(
+    os.environ.get("CODEX_WARMUP_RETRY_DELAY_SECONDS", str(DEFAULT_RETRY_DELAY_SECONDS))
+)
+DEFAULT_MAX_RETRIES = 5
+MAX_RETRIES = int(os.environ.get("CODEX_WARMUP_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
+
 
 def _redact(value: str) -> str:
     """Remove common account/token-looking values from diagnostic text."""
@@ -123,7 +130,13 @@ def initial_state() -> Dict[str, Any]:
     # Without an explicit anchor, make the first local calendar day day 1 and
     # persist it. Subsequent restarts therefore keep the same five-day cycle.
     epoch = EPOCH_TEXT or now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    return {"version": 1, "epoch": epoch, "last_slot": {"A": -1, "B": -1}}
+    return {
+        "version": 2,
+        "epoch": epoch,
+        "last_slot": {"A": -1, "B": -1},
+        "retry": {"A": None, "B": None},
+        "last_post_refresh": {},
+    }
 
 
 def load_state() -> Dict[str, Any]:
@@ -136,13 +149,37 @@ def load_state() -> Dict[str, Any]:
         last_slot = data.get("last_slot")
         if not isinstance(last_slot, dict):
             last_slot = {}
+
+        retry_raw = data.get("retry")
+        retry: Dict[str, Optional[Dict[str, Any]]] = {}
+        if isinstance(retry_raw, dict):
+            for acct in ("A", "B"):
+                entry = retry_raw.get(acct)
+                if isinstance(entry, dict):
+                    retry[acct] = {
+                        "slot": int(entry.get("slot", -1)),
+                        "attempts": int(entry.get("attempts", 0)),
+                        "next_retry_at": str(entry.get("next_retry_at", "")),
+                        "reason": str(entry.get("reason", "")),
+                    }
+                else:
+                    retry[acct] = None
+        else:
+            retry = {"A": None, "B": None}
+
+        last_post_refresh = data.get("last_post_refresh")
+        if not isinstance(last_post_refresh, dict):
+            last_post_refresh = {}
+
         return {
-            "version": 1,
+            "version": 2,
             "epoch": str(data.get("epoch") or initial_state()["epoch"]),
             "last_slot": {
                 "A": int(last_slot.get("A", -1)),
                 "B": int(last_slot.get("B", -1)),
             },
+            "retry": retry,
+            "last_post_refresh": last_post_refresh,
         }
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         log(f"state unreadable; starting conservatively: {_redact(str(exc))}")
@@ -219,6 +256,85 @@ def refresh_and_discover_aliases() -> Optional[Dict[str, str]]:
         return None
 
 
+def post_refresh_usage(account: str, alias: str, slot: int) -> Optional[Dict[str, Any]]:
+    """Query codex-switch --json list --force to update cache and record sanitized primary 5h usage."""
+    if not WARMUP_BIN.is_file() or not os.access(WARMUP_BIN, os.X_OK):
+        log(f"account={account} slot={slot} post-refresh skipped: codex-switch is unavailable")
+        return None
+    try:
+        result = subprocess.run(
+            [str(WARMUP_BIN), "--json", "list", "--force"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"account={account} slot={slot} post-refresh failed: command timed out")
+        return None
+    except OSError as exc:
+        log(
+            f"account={account} slot={slot} post-refresh failed: "
+            f"unable to execute codex-switch: {_redact(str(exc))}"
+        )
+        return None
+
+    if result.returncode != 0:
+        detail = _redact((result.stderr or result.stdout or "").strip())
+        log(
+            f"account={account} slot={slot} post-refresh failed "
+            f"exit_code={result.returncode} detail={detail or 'no diagnostic output'}"
+        )
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        log(
+            f"account={account} slot={slot} post-refresh failed "
+            f"detail=invalid JSON result: {_redact(str(exc))}"
+        )
+        return None
+
+    profiles = data.get("profiles", []) if isinstance(data, dict) else []
+    profile = next(
+        (p for p in profiles if isinstance(p, dict) and p.get("alias") == alias),
+        None,
+    )
+    if not profile:
+        log(f"account={account} slot={slot} post-refresh detail=profile not found in list")
+        return None
+
+    usage = profile.get("usage")
+    primary = usage.get("primary") if isinstance(usage, dict) else None
+
+    used = primary.get("used_percent") if isinstance(primary, dict) else None
+    resets_at = primary.get("resets_at") if isinstance(primary, dict) else None
+
+    reset_str = "none"
+    if isinstance(resets_at, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(resets_at, tz=tz())
+            reset_str = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+            reset_str = str(resets_at)
+    elif resets_at is not None:
+        reset_str = str(resets_at)
+
+    used_str = f"{used}%" if used is not None else "none"
+    log(
+        f"account={account} slot={slot} post-refresh primary: "
+        f"used={used_str} reset={_redact(reset_str)}"
+    )
+
+    return {
+        "slot": slot,
+        "at": now().isoformat(),
+        "used_percent": used,
+        "resets_at": resets_at,
+    }
+
+
 def due_slot(current: datetime, epoch: datetime, offset_minutes: int) -> int:
     elapsed = (
         current.timestamp()
@@ -227,10 +343,10 @@ def due_slot(current: datetime, epoch: datetime, offset_minutes: int) -> int:
     return int(elapsed // SLOT_MINUTES)
 
 
-def run_account(account: str, alias: str, slot: int) -> bool:
+def run_account(account: str, alias: str, slot: int) -> str:
     if not WARMUP_BIN.is_file() or not os.access(WARMUP_BIN, os.X_OK):
         log(f"account={account} slot={slot} skipped: codex-switch is unavailable")
-        return False
+        return "failed"
     try:
         result = subprocess.run(
             [str(WARMUP_BIN), "warmup", "--json", alias],
@@ -241,13 +357,13 @@ def run_account(account: str, alias: str, slot: int) -> bool:
         )
     except subprocess.TimeoutExpired:
         log(f"account={account} slot={slot} warmup failed detail=command timed out")
-        return False
+        return "failed"
     except OSError as exc:
         log(
             f"account={account} slot={slot} warmup failed "
             f"detail=unable to execute codex-switch: {_redact(str(exc))}"
         )
-        return False
+        return "failed"
 
     if result.returncode != 0:
         detail = _redact((result.stderr or result.stdout or "").strip())
@@ -255,7 +371,7 @@ def run_account(account: str, alias: str, slot: int) -> bool:
             f"account={account} slot={slot} warmup failed "
             f"exit_code={result.returncode} detail={detail or 'no diagnostic output'}"
         )
-        return False
+        return "failed"
 
     try:
         payload = json.loads(result.stdout)
@@ -264,7 +380,7 @@ def run_account(account: str, alias: str, slot: int) -> bool:
             f"account={account} slot={slot} warmup failed "
             f"detail=invalid JSON result: {_redact(str(exc))}"
         )
-        return False
+        return "failed"
 
     results = payload.get("results") if isinstance(payload, dict) else None
     item = (
@@ -284,29 +400,29 @@ def run_account(account: str, alias: str, slot: int) -> bool:
             f"account={account} slot={slot} warmup failed "
             "detail=missing result for target profile"
         )
-        return False
+        return "failed"
     if item.get("ok") is not True:
         detail = _redact(str(item.get("error") or "profile result was not successful"))
         log(f"account={account} slot={slot} warmup failed detail={detail}")
-        return False
+        return "failed"
     if payload.get("ok") is not True:
         detail = _redact(str(payload.get("error") or "overall result was not successful"))
         log(f"account={account} slot={slot} warmup failed detail={detail}")
-        return False
+        return "failed"
 
     skipped = item.get("skipped", False)
     if skipped is True:
         log(f"account={account} slot={slot} warmup skipped: active quota window")
-        return True
+        return "skipped"
     if skipped is not False:
         log(
             f"account={account} slot={slot} warmup failed "
             "detail=invalid skipped flag in profile result"
         )
-        return False
+        return "failed"
 
     log(f"account={account} slot={slot} warmup completed")
-    return True
+    return "completed"
 
 
 def run_once() -> int:
@@ -315,33 +431,152 @@ def run_once() -> int:
     epoch = parse_local_datetime(state.get("epoch", EPOCH_TEXT))
     offsets = {"A": 0, "B": B_OFFSET_MINUTES}
     due: Dict[str, int] = {}
+    state_modified = False
+
     for account in ("A", "B"):
         slot = due_slot(current, epoch, offsets[account])
-        if slot < 0 or slot <= int(state["last_slot"].get(account, -1)):
+        if slot < 0:
+            if state["retry"].get(account) is not None:
+                state["retry"][account] = None
+                state_modified = True
             continue
+
+        last = int(state["last_slot"].get(account, -1))
+        if slot <= last:
+            if state["retry"].get(account) is not None:
+                state["retry"][account] = None
+                state_modified = True
+            continue
+
+        # Check ongoing retry state
+        retry_info = state["retry"].get(account)
+        if retry_info is not None:
+            retry_slot = retry_info.get("slot")
+            if retry_slot != slot:
+                # Newer slot arrived; discard stale retry
+                state["retry"][account] = None
+                retry_info = None
+                state_modified = True
+            else:
+                attempts = int(retry_info.get("attempts", 0))
+                if attempts >= MAX_RETRIES:
+                    log(
+                        f"account={account} slot={slot} warmup retry limit reached "
+                        f"({attempts} attempts); consuming slot"
+                    )
+                    state["last_slot"][account] = slot
+                    state["retry"][account] = None
+                    state_modified = True
+                    continue
+
+                next_retry_str = retry_info.get("next_retry_at")
+                if next_retry_str:
+                    try:
+                        next_retry_time = parse_local_datetime(next_retry_str)
+                        if current < next_retry_time:
+                            # Waiting for retry delay (>= 60s); throttle
+                            continue
+                    except Exception:
+                        pass
+
         due[account] = slot
 
-    # Do no network work during idle polls. When one or more slots are due,
-    # consume them before any subprocess call so a refresh or warmup failure
-    # cannot become a 20-second retry storm.
+    if state_modified:
+        save_state(state)
+
     if not due:
         return 0
-    for account, slot in due.items():
-        # If the scheduler was down, run only the latest due slot instead of
-        # bursting every missed request at once. This preserves the cadence.
-        # Mark the slot before invoking the command. A failed command is still
-        # one scheduled attempt; retrying every poll would violate the strict
-        # five-hour cadence and could hammer the provider.
-        state["last_slot"][account] = slot
-    save_state(state)
 
     # A forced usage refresh is required even when aliases are explicitly
     # configured: codex-switch's warmup skip decision reads its usage cache.
     aliases = refresh_and_discover_aliases()
     if not aliases:
+        for account, slot in due.items():
+            existing = state["retry"].get(account)
+            attempts = (
+                existing["attempts"]
+                if (existing and existing.get("slot") == slot)
+                else 0
+            ) + 1
+            if attempts >= MAX_RETRIES:
+                log(
+                    f"account={account} slot={slot} profile refresh retry limit reached "
+                    f"({attempts} attempts); consuming slot"
+                )
+                state["last_slot"][account] = slot
+                state["retry"][account] = None
+            else:
+                next_retry = current + timedelta(seconds=RETRY_DELAY_SECONDS)
+                state["retry"][account] = {
+                    "slot": slot,
+                    "attempts": attempts,
+                    "next_retry_at": next_retry.isoformat(),
+                    "reason": "refresh_failed",
+                }
+        save_state(state)
         return 0
+
     for account, slot in due.items():
-        run_account(account, aliases[account], slot)
+        outcome = run_account(account, aliases[account], slot)
+        if outcome == "completed":
+            state["last_slot"][account] = slot
+            state["retry"][account] = None
+            save_state(state)
+
+            refreshed = post_refresh_usage(account, aliases[account], slot)
+            if refreshed:
+                state["last_post_refresh"][account] = refreshed
+                save_state(state)
+
+        elif outcome == "skipped":
+            # Active skip does NOT consume the slot!
+            existing = state["retry"].get(account)
+            attempts = (
+                existing["attempts"]
+                if (existing and existing.get("slot") == slot)
+                else 0
+            ) + 1
+            if attempts >= MAX_RETRIES:
+                log(
+                    f"account={account} slot={slot} warmup retry limit reached "
+                    f"({attempts} attempts); consuming slot"
+                )
+                state["last_slot"][account] = slot
+                state["retry"][account] = None
+            else:
+                next_retry = current + timedelta(seconds=RETRY_DELAY_SECONDS)
+                state["retry"][account] = {
+                    "slot": slot,
+                    "attempts": attempts,
+                    "next_retry_at": next_retry.isoformat(),
+                    "reason": "active_skip",
+                }
+            save_state(state)
+
+        else:  # outcome == "failed"
+            existing = state["retry"].get(account)
+            attempts = (
+                existing["attempts"]
+                if (existing and existing.get("slot") == slot)
+                else 0
+            ) + 1
+            if attempts >= MAX_RETRIES:
+                log(
+                    f"account={account} slot={slot} warmup retry limit reached "
+                    f"({attempts} attempts); consuming slot"
+                )
+                state["last_slot"][account] = slot
+                state["retry"][account] = None
+            else:
+                next_retry = current + timedelta(seconds=RETRY_DELAY_SECONDS)
+                state["retry"][account] = {
+                    "slot": slot,
+                    "attempts": attempts,
+                    "next_retry_at": next_retry.isoformat(),
+                    "reason": "warmup_failed",
+                }
+            save_state(state)
+
     return 0
 
 

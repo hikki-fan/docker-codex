@@ -168,9 +168,12 @@ The container starts the preinstalled Codex Relay in shared app-server mode:
 codex-relay --bg --shared-app-server
 ```
 
-The image wraps the Codex executable so `codex resume` automatically connects to
-the shared Unix socket. Other Codex commands are passed through unchanged. The
-explicit equivalent is:
+The image puts the Codex wrapper at `/opt/codex/bin/codex`, ahead of npm's
+`/usr/local/bin` entry point on PATH. Thus `codex resume` automatically connects
+to the shared Unix socket even after an in-container npm upgrade. Login shells
+also restore this path through `/etc/profile.d/codex-path.sh`. Other Codex
+commands and explicitly supplied remote endpoints are passed through unchanged.
+The explicit equivalent is:
 
 ```bash
 codex resume --remote unix://
@@ -203,19 +206,27 @@ The startup script then automatically:
    If every account is at or above 98%, the supervisor pauses and stops Relay
    so credits are not burned as 5h overflow.
 3. Uses the official Relay PID file and `codex-relay stop`/`--bg --shared-app-server`.
-4. Keeps state, locks, handoff packets, and logs under
+4. Polls forced account-global usage after each completed five-second wait.
+   Any TUI, Relay/mobile, background, or concurrent session that contributes
+   to the current account reaching 98% therefore triggers the same cutover.
+5. Keeps state, locks, handoff packets, and logs under
    `/home/codex/.codex-supervisor` (the persistent `/home/codex` mount).
 
-The image now includes a read-only app-server turn monitor. It connects to the
-shared Unix app-server, resumes/listens to known threads, and records
-`turn/started` plus terminal events for both terminal Codex and Relay/mobile
-traffic. If the socket or a thread resync fails, it records `UNKNOWN`; the
-supervisor then refuses to switch until a fresh snapshot is available.
+If three consecutive forced usage refreshes fail, the supervisor stops Relay
+instead of continuing to consume quota while blind. It keeps probing without
+parallel refreshes; after visibility returns it evaluates 98% before either
+switching profiles or restoring Relay.
+
+The legacy app-server turn monitor remains in the image but is disabled by
+default. Hard cutover uses account-global usage and does not need to resume or
+inspect threads. This avoids creating another writer while an operator is
+using `codex resume`. It can be re-enabled only for the optional drain mode by
+setting `CODEX_SUPERVISOR_TURN_MONITOR_ENABLED=true`.
 
 The supervisor hard-preempts at the 5h threshold: it does not wait for the
-current turn to become idle. The monitor still records turn boundaries so
-handoff can capture the thread ID. A manual/client integration can also
-record a turn boundary with:
+current turn to become idle and does not need to identify which thread caused
+the aggregate usage. A manual/client integration can optionally record a turn
+boundary for the legacy drain mode with:
 
 ```bash
 PYTHONPATH=/workspace/codex-account-supervisor \
@@ -227,69 +238,59 @@ PYTHONPATH=/workspace/codex-account-supervisor \
   python3 -m codex_account_supervisor turn-signal idle --turn-id TURN_ID
 ```
 
-After a successful cutover and Relay health check, the configured hook creates a
-detached `tmux` session (`codex-handoff-*`) and first attempts to resume the
-original thread on the new account. This is enabled only in the container
-config after validating the current Codex CLI/Relay behavior. If resume is
-rejected immediately, the hook falls back to a new thread with the continuation
-packet. The supervisor no longer marks the original thread dead in this mode.
-
-The turn monitor performs a full authoritative `thread/list`/`thread/resume`
-reconciliation every 30 seconds in addition to live events. This repairs stale
-active-turn entries when Relay reconnects while a terminal event is missed.
-With `preempt_in_flight_turns = true` (the container default), a live observer
-turn does **not** delay cutover: Relay is stopped, the turn is dropped, and
-the other account is used. Set that flag to false only if you need the older
-drain-until-idle behavior.
+After a successful cutover and Relay health check, the default configuration
+does not create a detached TUI, does not guess a continuation target, and does
+not mark any saved thread dead. The operator reconnects and manually chooses a
+session. `enable_handoff_hook=true` is a legacy opt-in and is not recommended
+for this mode.
 
 ### What the operator sees during a switch
 
 In a foreground `codex` CLI attached to the shared Relay, the current turn is
 aborted when the 5h threshold is reached. During the Relay stop/start window
 the CLI may report a closed connection, reconnect message, or return to its
-prompt. Do not start a second app-server and do not immediately run another
-`resume`: that can create two writers for the same thread. Wait until the
-supervisor is back in `WATCH` and Relay is healthy:
+prompt. Wait until the supervisor is back in `WATCH` and Relay is healthy:
 
 ```bash
 docker exec codex python3 -m codex_account_supervisor status \
   --config /home/codex/.codex-supervisor/config.toml
 ```
 
-If the handoff hook was enabled, inspect or attach to the detached continuation
-session after the switch:
-
-```bash
-docker exec codex tmux list-sessions
-docker exec -it codex tmux attach-session -t codex-handoff-<handoff-id-prefix>
-```
-
-If no handoff session exists, resume manually only after Relay is healthy:
+Then resume manually and select the desired saved session (or supply its ID):
 
 ```bash
 docker exec -it codex codex resume --remote unix:// <THREAD_ID>
 ```
 
-For a background task, automatic continuation works when the task belongs to a
-thread visible through the shared app-server and the handoff hook is healthy. The
-hook first resumes that thread on the new account; if the CLI rejects an
-immediate cross-account resume, it starts a new detached thread with the
-continuation packet. If the thread is not observable, the hook fails, or health
-checks do not converge, the supervisor enters `CIRCUIT_BROKEN` and leaves the
-packet for manual recovery instead of claiming the task continued.
+Background turns are also interrupted by the hard switch. They are not
+automatically resumed; choose the relevant saved session manually after Relay
+is healthy.
 
-The mobile client itself may briefly reconnect while Relay restarts. Its thread
-history remains the same local app-server rollout; the monitor does not need
-mobile pairing tokens and never submits a prompt through the mobile API.
+The mobile client itself may briefly reconnect while Relay restarts. Its usage
+is included in the same account-global quota sample.
 
 The startup script also runs `codex-warmup-scheduler`. It executes one targeted
 `codex-switch warmup --json <alias>` attempt for each account every five hours.
 The schedule is a deterministic five-day cycle: account A starts at day 1
 00:00, then repeats every five hours; account B uses the same cadence starting
 150 minutes later. Therefore day 5 ends at A 19:00 / B 21:30 and day 6 returns
-to day 1. The scheduler persists its last scheduled slot and prevents
-duplicates after polling or restart. It writes only redacted status lines to
-`/home/codex/.codex-switch/logs/warmup.log`.
+to day 1. The scheduler persists state under
+`/home/codex/.codex-supervisor/warmup-scheduler.json` and writes only redacted
+status lines to `/home/codex/.codex-switch/logs/warmup.log`.
+
+When a warmup attempt returns `{ok: true, skipped: true}` because a quota window
+is still active (for instance when a 5h slot arrives slightly earlier than the
+previous window's completion time), the slot is not marked consumed. Instead, the
+scheduler tracks a persistent, bounded retry in its state file:
+- Retries are throttled with a configurable delay (`CODEX_WARMUP_RETRY_DELAY_SECONDS`,
+  default 60s) to prevent polling storms every 20s.
+- Failures and active skips are bounded by `CODEX_WARMUP_MAX_RETRIES` (default 5
+  attempts); once reached, the slot is consumed to prevent infinite retry loops.
+- Upon successful warmup (`warmup completed`), the scheduler automatically executes
+  a forced usage refresh (`codex-switch --json list --force`) to update the local
+  cache, parses the primary 5-hour quota metrics for the warmed profile, and logs
+  only sanitized `used` and `reset` information without exposing credentials or tokens.
+- State files are upgraded seamlessly with backward compatibility for legacy v1 states.
 
 By default it discovers the two profiles and assigns the first two aliases in
 sorted order to A/B. To pin the mapping and cycle anchor, set

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-CODEX_REAL=/usr/local/bin/codex-real
+# npm owns /usr/local/bin/codex and replaces it during upgrades. This wrapper
+# lives earlier on PATH and calls the package entry point without recursing.
+CODEX_REAL="${CODEX_WRAPPER_REAL_BIN:-/usr/local/lib/node_modules/@openai/codex/bin/codex.js}"
 
 # Attach terminal resume commands to Relay's shared Unix-socket app-server.
 # Keep an explicitly supplied --remote endpoint unchanged.

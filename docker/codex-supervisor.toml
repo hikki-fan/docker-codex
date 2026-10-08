@@ -3,7 +3,8 @@
 
 used_threshold_percent = 98.0
 target_max_used_percent = 98.0
-check_interval_seconds = 30.0
+check_interval_seconds = 5.0
+usage_timeout_seconds = 45.0
 cooldown_seconds = 0.0
 
 # 5h used >= threshold hard-stops the shared app-server and switches
@@ -14,9 +15,10 @@ require_explicit_idle = true
 turn_signal_stale_seconds = 30.0
 preempt_in_flight_turns = true
 halt_relay_when_exhausted = true
-# Codex rollouts are account-bound. Cross-account continuation always starts
-# a fresh thread with a continuation prompt; the old thread ID is audit-only.
-cross_account_resume = false
+# The expected hard cutover disconnect is handled by reconnecting and choosing
+# a saved session manually. Never spawn or guess a continuation TUI.
+cross_account_resume = true
+enable_handoff_hook = false
 
 max_consecutive_failures = 3
 circuit_break_cooldown_seconds = 600.0
@@ -24,6 +26,7 @@ circuit_break_cooldown_seconds = 600.0
 base_dir = "/home/codex/.codex-supervisor"
 state_file = "/home/codex/.codex-supervisor/state.json"
 lock_file = "/home/codex/.codex-supervisor/supervisor.lock"
+usage_lock_file = "/home/codex/.codex-supervisor/usage.lock"
 turn_signal_file = "/home/codex/.codex-supervisor/turn_state.json"
 handoff_dir = "/home/codex/.codex-supervisor/handoffs"
 workspace_path = "/workspace"
@@ -35,9 +38,8 @@ switch_command = "/home/codex/.local/bin/codex-switch use {alias}"
 relay_start_command = "/usr/local/bin/codex-relay --bg --shared-app-server"
 relay_stop_command = "/usr/local/bin/codex-relay stop"
 
-# Starts a separate tmux Codex client against Relay's Unix app-server.  The
-# hook is executed only after the cutover and health check succeed.
-handoff_hook_command = "/usr/local/bin/codex-supervisor-new-thread --handoff {handoff_file}"
+# Legacy handoff hook intentionally omitted. The operator reconnects with
+# `codex resume` after Relay has restarted on the replacement account.
 
 dry_run = false
 log_level = "INFO"

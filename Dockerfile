@@ -11,7 +11,7 @@ ENV TZ=Asia/Shanghai
 ENV HOME=/home/codex
 ENV CODEX_VERSION=${CODEX_VERSION}
 ENV CODEX_RELAY_VERSION=${CODEX_RELAY_VERSION}
-ENV PATH="/usr/local/bin:/home/codex/.local/bin:${PATH}"
+ENV PATH="/opt/codex/bin:/usr/local/bin:/home/codex/.local/bin:${PATH}"
 
 RUN apt update && \
     apt install -y \
@@ -47,11 +47,13 @@ RUN npm_config_proxy="${HTTP_PROXY}" \
     npm_config_fetch_retries=2 \
     npm install -g @openai/codex@${CODEX_VERSION} codex-relay@${CODEX_RELAY_VERSION}
 
-# Keep the real CLI available while making `codex resume` attach to Relay's
-# shared app-server automatically. Other Codex subcommands pass through.
-RUN mv /usr/local/bin/codex /usr/local/bin/codex-real
-COPY docker/codex-wrapper /usr/local/bin/codex
-RUN chmod +x /usr/local/bin/codex
+# Keep the shared-session entry point outside npm's global bin directory so
+# an in-container npm upgrade cannot overwrite it. Retain codex-real for the
+# supervisor's non-interactive commands.
+RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex-real
+COPY docker/codex-wrapper /opt/codex/bin/codex
+COPY docker/codex-path.sh /etc/profile.d/codex-path.sh
+RUN chmod +x /opt/codex/bin/codex
 
 # AGY_VERSION invalidates this layer when the upstream Antigravity release changes.
 # The official installer downloads the current binary and verifies its SHA-512 digest.
