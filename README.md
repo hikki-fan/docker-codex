@@ -207,7 +207,9 @@ The startup script then automatically:
    even if a turn is still running or the current account still has credits.
    If every account is at or above 98%, the supervisor pauses and stops Relay
    so credits are not burned as 5h overflow.
-3. Uses the official Relay PID file and `codex-relay stop`/`--bg --shared-app-server`.
+3. Uses supervisor >= 0.2.0 with `managed_runtime=true`: stops the real managed
+   app-server daemon as well as Relay, verifies the restarted runtime account
+   matches the selected profile, then resumes captured unfinished root tasks.
 4. Polls forced account-global usage after each completed five-second wait.
    Any TUI, Relay/mobile, background, or concurrent session that contributes
    to the current account reaching 98% therefore triggers the same cutover.
@@ -220,9 +222,9 @@ parallel refreshes; after visibility returns it evaluates 98% before either
 switching profiles or restoring Relay.
 
 The legacy app-server turn monitor remains in the image but is disabled by
-default. Hard cutover uses account-global usage and does not need to resume or
-inspect threads. This avoids creating another writer while an operator is
-using `codex resume`. It can be re-enabled only for the optional drain mode by
+default. Threshold detection uses account-global usage; native RPC captures
+unfinished root tasks only when needed for a cutover. The old observer can be
+re-enabled only for the optional legacy drain mode by
 setting `CODEX_SUPERVISOR_TURN_MONITOR_ENABLED=true`.
 
 The supervisor hard-preempts at the 5h threshold: it does not wait for the
@@ -240,11 +242,13 @@ PYTHONPATH=/workspace/codex-account-supervisor \
   python3 -m codex_account_supervisor turn-signal idle --turn-id TURN_ID
 ```
 
-After a successful cutover and Relay health check, the default configuration
-does not create a detached TUI, does not guess a continuation target, and does
-not mark any saved thread dead. The operator reconnects and manually chooses a
-session. `enable_handoff_hook=true` is a legacy opt-in and is not recommended
-for this mode.
+After a successful cutover, runtime account identity is verified with
+`account/read`. Each captured task resumes in its exact original thread via
+`thread/resume` and `turn/start`, without spawning a detached TUI or guessing
+the last session. A durable per-task journal prevents blind redispatch after
+ambiguous failures. Keep `enable_handoff_hook=false` to avoid two continuers.
+Existing persistent configuration is not overwritten: enable `managed_runtime`
+and `auto_resume_tasks` there when upgrading the private supervisor checkout.
 
 ### What the operator sees during a switch
 
@@ -258,15 +262,17 @@ docker exec codex python3 -m codex_account_supervisor status \
   --config /home/codex/.codex-supervisor/config.toml
 ```
 
-Then resume manually and select the desired saved session (or supply its ID):
+Then reconnect to view the original session (or supply its ID). The unfinished
+task is continued by the supervisor; do not submit the same task again:
 
 ```bash
 docker exec -it codex codex resume --remote unix:// <THREAD_ID>
 ```
 
-Background turns are also interrupted by the hard switch. They are not
-automatically resumed; choose the relevant saved session manually after Relay
-is healthy.
+Background turns are interrupted and automatically continued after verified
+cutover. Completed turns are not replayed. Tasks requiring a human approval or
+decision still wait for the operator; arbitrary external side effects cannot
+be guaranteed exactly-once across abrupt process termination.
 
 The mobile client itself may briefly reconnect while Relay restarts. Its usage
 is included in the same account-global quota sample.
