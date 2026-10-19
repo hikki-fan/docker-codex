@@ -207,7 +207,7 @@ The startup script then automatically:
    even if a turn is still running or the current account still has credits.
    If every account is at or above 98%, the supervisor pauses and stops Relay
    so credits are not burned as 5h overflow.
-3. Uses supervisor >= 0.2.0 with `managed_runtime=true`: stops the real managed
+3. Uses supervisor >= 0.2.1 with `managed_runtime=true`: stops the real managed
    app-server daemon as well as Relay, verifies the restarted runtime account
    matches the selected profile, then resumes captured unfinished root tasks.
 4. Polls forced account-global usage after each completed five-second wait.

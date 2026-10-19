@@ -16,13 +16,14 @@ turn_signal_stale_seconds = 30.0
 preempt_in_flight_turns = true
 halt_relay_when_exhausted = true
 # Runtime identity must match the switched profile before resuming captured
-# root tasks in their original threads. Requires supervisor >= 0.2.0.
+# root tasks in their original threads. Requires supervisor >= 0.2.1.
 cross_account_resume = true
 enable_handoff_hook = false
 managed_runtime = true
 auto_resume_tasks = true
 codex_binary = "/usr/local/bin/codex-real"
 runtime_timeout_seconds = 20.0
+runtime_resume_timeout_seconds = 120.0
 runtime_retry_seconds = 30.0
 
 max_consecutive_failures = 3
