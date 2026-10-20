@@ -41,8 +41,8 @@ relay_pid_file = "~/.local/share/codex-relay/server.pid"
 relay_socket_path = "/home/codex/.codex/app-server-control/app-server-control.sock"
 usage_command = "/home/codex/.local/bin/codex-switch --json list --force"
 switch_command = "/home/codex/.local/bin/codex-switch use {alias}"
-relay_start_command = "/usr/local/bin/codex-relay --bg --shared-app-server"
-relay_stop_command = "/usr/local/bin/codex-relay stop"
+relay_start_command = "/opt/codex/bin/codex-relay --bg --shared-app-server"
+relay_stop_command = "/opt/codex/bin/codex-relay stop"
 
 # No legacy hook: native RPC continuation owns the saved task transaction.
 

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+base="${CODEX_MAGPIE_DIR:-/home/codex/.local/share/codex-magpie}"
+export XDG_CONFIG_HOME="${base}/config"
+export XDG_CACHE_HOME="${base}/cache"
+export XDG_DATA_HOME="${base}/data"
+export XDG_STATE_HOME="${base}/state"
+export MAGPIE_NO_ACCOUNTS="${MAGPIE_NO_ACCOUNTS:-1}"
+export MAGPIE_ADDR="${MAGPIE_ADDR:-127.0.0.1:3425}"
+export DO_NOT_TRACK=1
+exec "${CODEX_TOOLS_ROOT:-/home/codex/.local/share/codex-tools}/magpie/current/magpie" "$@"

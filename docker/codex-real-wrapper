@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+candidate="${CODEX_TOOLS_ROOT:-/home/codex/.local/share/codex-tools}/codex/current/node_modules/@openai/codex/bin/codex.js"
+if [ -x "$candidate" ]; then
+  exec "$candidate" "$@"
+fi
+exec /usr/local/lib/node_modules/@openai/codex/bin/codex.js "$@"

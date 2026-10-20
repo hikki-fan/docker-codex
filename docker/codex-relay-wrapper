@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+candidate="${CODEX_TOOLS_ROOT:-/home/codex/.local/share/codex-tools}/relay/current/node_modules/codex-relay/dist/cli.js"
+if [ -f "$candidate" ]; then
+  exec node "$candidate" "$@"
+fi
+exec node /usr/local/lib/node_modules/codex-relay/dist/cli.js "$@"

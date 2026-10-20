@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${script_dir}/bootstrap-tools.sh" ]; then
+  bash "${script_dir}/bootstrap-tools.sh"
+fi
+
 export PATH="/opt/codex/bin:/usr/local/bin:/home/codex/.local/bin:${PATH}"
 # Relay bundles a CLI that may lag the image's globally installed version.
 export CODEX_BIN="${CODEX_BIN:-/usr/local/bin/codex-real}"
@@ -80,11 +85,21 @@ pid_is_expected() {
 
 # Never overwrite an operator's persistent config.  The shipped file is a
 # conservative default (98% used threshold and explicit idle signal required).
-if [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/config.toml ]; then
+if [ "${CODEX_SUPERVISOR_ENABLED:-true}" = "true" ] && \
+   [ ! -f "${SUPERVISOR_CONFIG}" ] && [ -f /usr/local/share/codex-supervisor/config.toml ]; then
   install -m 600 /usr/local/share/codex-supervisor/config.toml "${SUPERVISOR_CONFIG}"
 fi
 
-if [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
+if [ "${CODEX_SUPERVISOR_ENABLED:-true}" != "true" ]; then
+  # Explicit migration switch: disabling it also stops the existing owner.
+  if [ -f "${SUPERVISOR_PID}" ]; then
+    supervisor_pid=$(cat "${SUPERVISOR_PID}" 2>/dev/null || true)
+    if pid_is_expected "${supervisor_pid}" "codex_account_supervisor"; then
+      kill -TERM "${supervisor_pid}"
+    fi
+  fi
+  echo "Account supervisor disabled; Magpie takeover must be explicitly configured"
+elif [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
   if [ -f "${SUPERVISOR_PID}" ] && \
      pid_is_expected "$(cat "${SUPERVISOR_PID}" 2>/dev/null || true)" "codex_account_supervisor"; then
     : # An already-running instance owns the lock; do not create a duplicate.
@@ -107,6 +122,7 @@ fi
 # with an operator's manual resume.
 TURN_MONITOR_ENABLED="${CODEX_SUPERVISOR_TURN_MONITOR_ENABLED:-false}"
 if [ "${TURN_MONITOR_ENABLED}" = "true" ] && \
+   [ "${CODEX_SUPERVISOR_ENABLED:-true}" = "true" ] && \
    [ -f /usr/local/bin/codex-supervisor-turn-monitor.mjs ] && \
    [ -f "${SUPERVISOR_SOURCE}/pyproject.toml" ]; then
   if [ -f "${TURN_MONITOR_PID}" ] && \
@@ -132,7 +148,8 @@ fi
 # Warm quota windows on the configured five-hour cadence without enabling
 # codex-switch's account-switching daemon. The account supervisor remains the
 # sole switch owner.
-if [ -x /usr/local/bin/codex-warmup-scheduler ] && \
+if [ "${CODEX_WARMUP_ENABLED:-true}" = "true" ] && \
+   [ -x /usr/local/bin/codex-warmup-scheduler ] && \
    [ -x /home/codex/.local/bin/codex-switch ]; then
   if ! [ -f "${WARMUP_SCHEDULER_PID}" ] || \
      ! pid_is_expected "$(cat "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true)" \
@@ -143,6 +160,19 @@ if [ -x /usr/local/bin/codex-warmup-scheduler ] && \
       </dev/null >>"${SUPERVISOR_LOG}" 2>&1 &
     echo $! >"${WARMUP_SCHEDULER_PID}"
     chmod 600 "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true
+  fi
+elif [ "${CODEX_WARMUP_ENABLED:-true}" != "true" ] && [ -f "${WARMUP_SCHEDULER_PID}" ]; then
+  warmup_pid=$(cat "${WARMUP_SCHEDULER_PID}" 2>/dev/null || true)
+  if pid_is_expected "${warmup_pid}" "codex-warmup-scheduler"; then
+    kill -TERM "${warmup_pid}"
+  fi
+fi
+
+if [ "${CODEX_MAGPIE_ENABLED:-false}" = "true" ]; then
+  if [ -x "${CODEX_TOOLS_ROOT:-/home/codex/.local/share/codex-tools}/magpie/current/magpie" ]; then
+    codex-magpie start || echo "Magpie startup failed; existing Codex services remain available" >&2
+  else
+    echo "Magpie not installed; run codex-tools update magpie then codex-magpie start" >&2
   fi
 fi
 

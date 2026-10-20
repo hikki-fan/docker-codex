@@ -42,14 +42,13 @@ DOCKERHUB_TOKEN = your Docker Hub access token
 
 Use a Docker Hub access token, not your Docker Hub password.
 
-## Automatic Updates
+## Image builds and manual updates
 
-The workflow in `.github/workflows/update-codex-image.yml` runs in three cases:
+The workflow in `.github/workflows/update-codex-image.yml` no longer runs daily:
 
 ```text
-1. Every day at 03:00 UTC
-2. Manually from the GitHub Actions page, optionally with force rebuild enabled
-3. When Dockerfile, files under `docker/`, or the workflow file change on main
+1. Manually from the GitHub Actions page, optionally with force rebuild enabled
+2. When Dockerfile, files under `docker/`, or the workflow file change on main
 ```
 
 Each run checks:
@@ -342,10 +341,91 @@ tmux new -s codex
 codex
 ```
 
-## Update Flow
+## Magpie inside the Codex container
+
+The Compose entrypoint loads the helper scripts from the persistent
+`/workspace/docker-codex/docker` checkout. Keep that checkout available.
+`bootstrap-tools.sh` restores command wrappers after container recreation.
+The base image still supplies fallback Codex/Relay/AGY binaries until each tool
+has been installed into the persistent tool directory.
+
+Install and start Magpie once (not on every container start):
+
+```bash
+codex-tools update magpie
+codex-magpie start
+codex-magpie status
+```
+
+Magpie lives under `/home/codex/.local/share/codex-tools/magpie`; its isolated
+settings/cache and protected Web key live under
+`/home/codex/.local/share/codex-magpie`. This is covered by the existing home
+bind mount. The settings disable automatic updates/downloads, automatic update
+restarts and account discovery. Installation does not import accounts, change
+Codex authentication, or route existing sessions through Magpie.
+
+The gateway listens on container loopback port 3425. Only the Web interface is
+published, to **host loopback only**, at `127.0.0.1:3430`. From your computer:
+
+```bash
+ssh -L 3430:127.0.0.1:3430 admin@YOUR_NAS
+```
+
+Then run `docker exec codex codex-magpie access` yourself and open the returned
+URL in that computer's browser. Treat that URL as a secret; it grants management
+access. Never paste it into an issue or commit it. The unkeyed page returns 401.
+Use HTTPS through an authenticated reverse proxy/VPN before changing this to
+LAN/public exposure. No gateway port is published in this initial setup.
+
+The watchdog retries a failed Magpie process after five seconds, owns a single
+lock, checks PID start-time before signaling, and logs lifecycle events only;
+Magpie's startup login URL is not written into the log. Commands:
+
+```bash
+codex-magpie status
+codex-magpie restart
+codex-magpie stop
+codex-tools status
+```
+
+### Update programs manually, without rebuilding the container
+
+```bash
+codex-tools update magpie
+codex-magpie restart
+
+# Run these in a maintenance window. Updating does NOT restart the services:
+codex-tools update codex
+codex-tools update relay
+codex-tools update agy
+```
+
+Each installer stages and validates a version, then atomically changes its
+`current` symlink; old versions remain available. Magpie verifies the official
+release's SHA-256; AGY uses its official installer's SHA-512 verification.
+Codex/Relay can be pinned with `--version VERSION`. Never use global npm updates
+for persistent maintenance: they modify the disposable image layer instead.
+
+For Codex/Relay upgrades, pause work and coordinate their restart with the
+official managed-daemon CLI and Relay, then confirm client/server versions.
+A running process still has the old executable until it is restarted; updating
+the on-disk command alone is not proof that the running service was updated.
+Do not perform those restarts in the middle of work without a recovery plan.
+Base OS/Node security updates still require occasional image maintenance.
+
+### Later account-pool migration
+
+This install leaves account discovery off. Before activating a Magpie account
+pool, validate the accounts, routing cap, long-history compaction and tool calls.
+Then stop the old supervisor and set `CODEX_SUPERVISOR_ENABLED=false` in Compose
+so a restart cannot re-enable its switching. Set `CODEX_WARMUP_ENABLED=false`
+when migrating warm-up ownership too. Never run two account-switch owners.
+The actual deployment may already have these disabled; preserve that state.
+
+## Image build flow
 
 ```text
-GitHub Actions schedule
+Manual GitHub Actions run / relevant source change
   -> npm view @openai/codex version
   -> npm view codex-relay version
   -> Antigravity release manifest version
@@ -354,4 +434,5 @@ GitHub Actions schedule
   -> build and push only when an update is needed
 ```
 
-This keeps the Docker Hub image updated without rebuilding every day when Codex has not changed.
+There is no scheduled daily image build. Compose uses `pull_policy: missing`;
+an intentional image pull/recreation remains an operator maintenance action.

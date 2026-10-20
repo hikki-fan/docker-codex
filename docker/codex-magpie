@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""Manage only the isolated, persistent Magpie service, never Codex accounts."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import secrets
+import signal
+import subprocess
+import sys
+import time
+
+
+def root():
+    p = Path(os.environ.get('CODEX_MAGPIE_DIR', '/home/codex/.local/share/codex-magpie')).expanduser().absolute()
+    if str(p) in {'/', '/home', '/home/codex', '/workspace', '/tmp'}:
+        raise RuntimeError('Refusing broad service directory')
+    p.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(p, 0o700)
+    return p
+
+
+def binary():
+    return Path(os.environ.get('CODEX_TOOLS_ROOT', '/home/codex/.local/share/codex-tools')) / 'magpie/current/magpie'
+
+
+def prepare():
+    base = root()
+    for name in ('config', 'cache', 'data', 'state', 'config/magpie'):
+        base.joinpath(name).mkdir(parents=True, exist_ok=True, mode=0o700)
+    keyfile = base / 'web.key'
+    if not keyfile.exists():
+        fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as out:
+            out.write(secrets.token_hex(32))
+    os.chmod(keyfile, 0o600)
+    key = keyfile.read_text().strip()
+    if len(key) < 16 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~' for c in key):
+        raise RuntimeError('Invalid protected web key')
+    settings = base / 'config/magpie/settings.json'
+    # Never overwrite operator settings during startup. Initial installation
+    # disables discovery, automatic updates/downloads and version restarts.
+    if not settings.exists():
+        with settings.open('x') as out:
+            os.chmod(settings, 0o600)
+            json.dump({'noAutoUpdate': True, 'noAutoDownload': True, 'autoRestart': False,
+                       'noAccountDiscovery': True, 'gatewayMode': 'on'}, out)
+    env = os.environ.copy()
+    env.update(XDG_CONFIG_HOME=str(base/'config'), XDG_CACHE_HOME=str(base/'cache'),
+               XDG_DATA_HOME=str(base/'data'), XDG_STATE_HOME=str(base/'state'),
+               MAGPIE_WEB_KEY=key, MAGPIE_NO_ACCOUNTS=os.environ.get('MAGPIE_NO_ACCOUNTS', '1'),
+               MAGPIE_ADDR=os.environ.get('MAGPIE_ADDR', '127.0.0.1:3425'), DO_NOT_TRACK='1')
+    return base, env, key
+
+
+def process_alive(pid, start):
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text().split(') ', 1)[1].split()
+        return stat[0] != 'Z' and stat[19] == str(start)
+    except (FileNotFoundError, IndexError, ProcessLookupError):
+        return False
+
+
+def owner():
+    try:
+        data = json.loads((root()/'watchdog.json').read_text())
+        if process_alive(data['pid'], data['start']):
+            command = Path(f"/proc/{data['pid']}/cmdline").read_bytes().split(b'\0')
+            if any(Path(arg.decode()).name == 'codex-magpie' for arg in command if arg):
+                return data
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def log_line(base, message, key):
+    path = base / 'service.log'
+    if path.exists() and path.stat().st_size > 2 * 1024 * 1024:
+        path.replace(base/'service.log.1')
+    with path.open('a') as out:
+        os.chmod(path, 0o600)
+        out.write(time.strftime('%Y-%m-%d %H:%M:%S ') + message.replace(key, '[REDACTED]')[:8192] + '\n')
+
+
+def health():
+    base, env, _ = prepare()
+    if not binary().is_file():
+        return False
+    result = subprocess.run([str(binary()), 'healthcheck'], env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    return result.returncode == 0
+
+
+def run():
+    base, env, key = prepare()
+    with (base/'watchdog.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        pid = os.getpid()
+        start = Path(f'/proc/{pid}/stat').read_text().split(') ', 1)[1].split()[19]
+        with (base/'watchdog.json').open('w') as out:
+            os.chmod(base/'watchdog.json', 0o600)
+            json.dump({'pid': pid, 'start': start}, out)
+        stopping = False
+        child = None
+
+        def stop(_sig, _frame):
+            nonlocal stopping
+            stopping = True
+            if child and child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        try:
+            while not stopping:
+                if not binary().is_file():
+                    log_line(base, 'Magpie not installed; run codex-tools update magpie', key)
+                    break
+                child = subprocess.Popen([str(binary()), 'web', '--addr',
+                    os.environ.get('CODEX_MAGPIE_WEB_ADDR', '0.0.0.0:3430'), '--no-open'],
+                    env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+                # Magpie prints its secret login URL on startup. Keep only
+                # our lifecycle events, never persist provider CLI output.
+                log_line(base, 'Magpie Web process started', key)
+                while child.poll() is None and not stopping:
+                    time.sleep(.25)
+                if stopping:
+                    break
+                if not stopping:
+                    log_line(base, f'Magpie exited ({child.returncode}); retry in 5 seconds', key)
+                    for _ in range(50):
+                        if stopping:
+                            break
+                        time.sleep(.1)
+        finally:
+            if child and child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    child.wait(timeout=5)
+            (base/'watchdog.json').unlink(missing_ok=True)
+
+
+def start():
+    prepare()
+    if not binary().is_file():
+        raise RuntimeError('Install Magpie first: codex-tools update magpie')
+    if not owner():
+        subprocess.Popen([sys.executable, str(Path(__file__).absolute()), 'run'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(40):
+        if owner() and health():
+            print('Magpie started; gateway healthy')
+            return
+        time.sleep(.25)
+    raise RuntimeError('Magpie startup not healthy; inspect protected service.log')
+
+
+def stop():
+    data = owner()
+    if data:
+        os.kill(data['pid'], signal.SIGTERM)
+        for _ in range(100):
+            if not process_alive(data['pid'], data['start']):
+                break
+            time.sleep(.1)
+        else:
+            raise RuntimeError('Watchdog did not stop; no unrelated process was killed')
+    print('Magpie stopped')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['start', 'stop', 'restart', 'status', 'access', 'run'])
+    command = parser.parse_args().command
+    if command == 'run':
+        return run()
+    if command == 'start':
+        return start()
+    if command == 'stop':
+        return stop()
+    if command == 'restart':
+        stop()
+        return start()
+    if command == 'access':
+        _, _, key = prepare()
+        print('http://127.0.0.1:3430/?k=' + key)
+        return
+    base, env, _ = prepare()
+    settings = json.loads((base/'config/magpie/settings.json').read_text())
+    discovery = env['MAGPIE_NO_ACCOUNTS'].lower() in {'', '0', 'false'} and not settings.get('noAccountDiscovery', False)
+    print(json.dumps({'running': bool(owner()), 'healthy': health(),
+                      'installed': binary().is_file(), 'account_discovery': discovery,
+                      'directory': str(root())}))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:
+        print(f'codex-magpie: failed ({type(error).__name__}); check configuration and protected log', file=sys.stderr)
+        raise SystemExit(1)

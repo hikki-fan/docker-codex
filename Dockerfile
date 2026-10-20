@@ -52,10 +52,15 @@ RUN npm_config_proxy="${HTTP_PROXY}" \
 # Keep the shared-session entry point outside npm's global bin directory so
 # an in-container npm upgrade cannot overwrite it. Retain codex-real for the
 # supervisor's non-interactive commands.
-RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex-real
+COPY docker/codex-real-wrapper /usr/local/bin/codex-real
 COPY docker/codex-wrapper /opt/codex/bin/codex
+COPY docker/codex-relay-wrapper /opt/codex/bin/codex-relay
+COPY docker/agy-wrapper /opt/codex/bin/agy
+COPY docker/magpie-wrapper /opt/codex/bin/magpie
+COPY docker/codex-tools /usr/local/bin/codex-tools
+COPY docker/codex-magpie /usr/local/bin/codex-magpie
 COPY docker/codex-path.sh /etc/profile.d/codex-path.sh
-RUN chmod +x /opt/codex/bin/codex
+RUN chmod +x /opt/codex/bin/* /usr/local/bin/codex-real /usr/local/bin/codex-tools /usr/local/bin/codex-magpie
 
 # AGY_VERSION invalidates this layer when the upstream Antigravity release changes.
 # The official installer downloads the current binary and verifies its SHA-512 digest.

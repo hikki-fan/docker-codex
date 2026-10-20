@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+candidate="${CODEX_TOOLS_ROOT:-/home/codex/.local/share/codex-tools}/agy/current/bin/agy"
+if [ -x "$candidate" ]; then
+  exec "$candidate" "$@"
+fi
+exec /usr/local/bin/agy "$@"

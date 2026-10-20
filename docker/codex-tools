@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""Install and inspect persistent, manually-updated Codex tools."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import Iterator, Sequence
+
+
+DEFAULT_ROOT = "/home/codex/.local/share/codex-tools"
+MAGPIE_LATEST_URL = "https://usemagpie.ai/api/latest"
+AGY_INSTALLER_URL = "https://antigravity.google/cli/install.sh"
+MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_BINARY_BYTES = 512 * 1024 * 1024
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+AGY_OUTPUT_VERSION_RE = re.compile(r"(?<![A-Za-z0-9.+-])v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?![A-Za-z0-9.+-])")
+BROAD_ROOTS = {
+    Path("/"),
+    Path("/home"),
+    Path("/home/codex"),
+    Path("/root"),
+    Path("/usr"),
+    Path("/usr/local"),
+    Path("/etc"),
+    Path("/var"),
+    Path("/opt"),
+    Path("/tmp"),
+    Path("/workspace"),
+}
+NPM_TOOLS = {
+    "codex": {
+        "package": "@openai/codex",
+        "entry": "node_modules/@openai/codex/bin/codex.js",
+        "version_file": "node_modules/@openai/codex/package.json",
+    },
+    "relay": {
+        "package": "codex-relay",
+        "entry": "node_modules/codex-relay/dist/cli.js",
+        "version_file": "node_modules/codex-relay/package.json",
+    },
+}
+
+
+class ManagerError(Exception):
+    """An actionable error safe to show without exposing subprocess output."""
+
+
+def _safe_root(raw: str | None = None) -> Path:
+    configured = raw if raw is not None else os.environ.get("CODEX_TOOLS_ROOT", DEFAULT_ROOT)
+    supplied = Path(configured).expanduser()
+    if not supplied.is_absolute():
+        raise ManagerError("CODEX_TOOLS_ROOT must be an absolute path")
+    if supplied.is_symlink():
+        raise ManagerError("CODEX_TOOLS_ROOT must not itself be a symlink")
+    root = supplied.resolve(strict=False)
+    if root in BROAD_ROOTS or len(root.parts) < 3:
+        raise ManagerError(f"refusing broad install target: {root}")
+    return root
+
+
+def _check_real_directory(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        raise ManagerError(f"managed path is not a real directory: {path}")
+
+
+def _private_directory(path: Path) -> None:
+    _check_real_directory(path)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _check_real_directory(path)
+    path.chmod(0o700)
+
+
+def _prepare_tool(root: Path, tool: str) -> tuple[Path, Path]:
+    _private_directory(root)
+    tool_root = root / tool
+    _private_directory(tool_root)
+    versions = tool_root / "versions"
+    _private_directory(versions)
+    return tool_root, versions
+
+
+@contextlib.contextmanager
+def update_lock(root: Path) -> Iterator[None]:
+    """Serialize all mutations under one private root-level flock."""
+    _private_directory(root)
+    lock_path = root / ".update.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        raise ManagerError("could not open the private update lock") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ManagerError("update lock is not a regular file")
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ManagerError("another codex-tools update is already in progress") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _run_command(
+    args: Sequence[str], *, env: dict[str, str] | None = None, timeout: int = 30
+) -> str:
+    """Run a child quietly; never forward its stdout/stderr to the terminal."""
+    try:
+        result = subprocess.run(
+            list(args),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise ManagerError(f"{Path(args[0]).name} timed out after {timeout} seconds") from None
+    except OSError:
+        raise ManagerError(f"could not execute {Path(args[0]).name}") from None
+    if result.returncode:
+        raise ManagerError(f"{Path(args[0]).name} failed (exit status {result.returncode})")
+    return result.stdout
+
+
+def _fetch_json(url: str) -> dict[str, object]:
+    request = urllib.request.Request(url, headers={"User-Agent": "codex-tools/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = response.read(MAX_JSON_BYTES + 1)
+    except (OSError, urllib.error.URLError, TimeoutError):
+        raise ManagerError("could not retrieve the upstream release metadata") from None
+    if len(payload) > MAX_JSON_BYTES:
+        raise ManagerError("upstream release metadata is unexpectedly large")
+    try:
+        result = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ManagerError("upstream release metadata is invalid JSON") from None
+    if not isinstance(result, dict):
+        raise ManagerError("upstream release metadata has an invalid shape")
+    return result
+
+
+def _download_to_file(url: str, destination: Path, max_bytes: int = MAX_BINARY_BYTES) -> int:
+    request = urllib.request.Request(url, headers={"User-Agent": "codex-tools/1.0"})
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, destination.open("xb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ManagerError("download exceeds the safety size limit")
+                output.write(chunk)
+    except ManagerError:
+        raise
+    except (OSError, urllib.error.URLError, TimeoutError):
+        raise ManagerError("upstream download failed") from None
+    return total
+
+
+def _valid_version(version: object) -> str:
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise ManagerError("upstream returned an invalid version string")
+    return version
+
+
+def _set_version_metadata(directory: Path, version: str) -> None:
+    marker = directory / ".codex-tools-version"
+    fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write(version + "\n")
+
+
+def _switch_current(tool_root: Path, version_dir: Path) -> None:
+    """Atomically point `current` at a version directory, retaining old versions."""
+    current = tool_root / "current"
+    try:
+        mode = current.lstat().st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISLNK(mode):
+        raise ManagerError(f"refusing to replace non-symlink current path: {current}")
+    relative = version_dir.relative_to(tool_root)
+    temporary = tool_root / f".current-{os.getpid()}-{uuid.uuid4().hex}"
+    os.symlink(str(relative), temporary)
+    try:
+        os.replace(temporary, current)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _magpie_platform_asset() -> str:
+    if not sys.platform.startswith("linux"):
+        raise ManagerError("Magpie manual updates are supported only on Linux")
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        arch = "amd64"
+    elif machine in {"aarch64", "arm64"}:
+        arch = "arm64"
+    else:
+        raise ManagerError(f"unsupported Magpie CPU architecture: {machine}")
+    return f"magpie-cli-linux-{arch}"
+
+
+def _magpie_release() -> tuple[str, str, str, int | None]:
+    release = _fetch_json(MAGPIE_LATEST_URL)
+    version = _valid_version(release.get("version"))
+    assets = release.get("assets")
+    asset = assets.get(_magpie_platform_asset()) if isinstance(assets, dict) else None
+    if not isinstance(asset, dict):
+        raise ManagerError("Magpie latest metadata has no matching Linux CLI asset")
+    url = asset.get("url")
+    parsed_url = urllib.parse.urlparse(url) if isinstance(url, str) else None
+    if (
+        parsed_url is None
+        or parsed_url.scheme != "https"
+        or parsed_url.hostname != "github.com"
+        or "/yetone/magpie-releases/releases/download/" not in parsed_url.path
+    ):
+        raise ManagerError("Magpie latest metadata contains an unexpected download URL")
+    checksum = asset.get("sha256")
+    if not isinstance(checksum, str) or not re.fullmatch(r"[A-Fa-f0-9]{64}", checksum):
+        raise ManagerError("Magpie latest metadata has no valid SHA-256 checksum")
+    size = asset.get("size")
+    expected_size = size if isinstance(size, int) and size >= 0 else None
+    return version, url, checksum.lower(), expected_size
+
+
+def _install_magpie(tool_root: Path, versions: Path, requested_version: str | None) -> str:
+    if requested_version is not None:
+        raise ManagerError("Magpie version pinning is not supported; omit --version to install latest")
+    version, url, expected_sha, expected_size = _magpie_release()
+    final_dir = versions / version
+    if final_dir.is_symlink():
+        raise ManagerError("refusing to use a symlinked Magpie version directory")
+    if final_dir.exists():
+        binary = final_dir / "magpie"
+        if not final_dir.is_dir() or not binary.is_file() or _sha256(binary) != expected_sha:
+            raise ManagerError(f"Magpie version directory already exists and will not be overwritten: {version}")
+        if not (final_dir / ".codex-tools-version").exists():
+            _set_version_metadata(final_dir, version)
+        _switch_current(tool_root, final_dir)
+        return version
+
+    staging = Path(tempfile.mkdtemp(prefix=".staging-magpie-", dir=versions))
+    staging.chmod(0o700)
+    binary = staging / "magpie"
+    isolated_home = staging / ".home"
+    try:
+        downloaded_size = _download_to_file(url, binary)
+        if expected_size is not None and downloaded_size != expected_size:
+            raise ManagerError("Magpie download size did not match upstream metadata")
+        if _sha256(binary) != expected_sha:
+            raise ManagerError("Magpie SHA-256 verification failed; current version was left unchanged")
+        binary.chmod(0o755)
+        _private_directory(isolated_home)
+        version_env = os.environ.copy()
+        version_env.update(
+            {
+                "HOME": str(isolated_home),
+                "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+                "XDG_DATA_HOME": str(isolated_home / ".local/share"),
+                "MAGPIE_NO_ACCOUNTS": "1",
+                "DO_NOT_TRACK": "1",
+            }
+        )
+        reported = _run_command([str(binary), "--version"], env=version_env, timeout=30)
+        if not _version_is_reported(reported, version):
+            raise ManagerError("Magpie --version did not report the downloaded release version")
+        shutil.rmtree(isolated_home)
+        _set_version_metadata(staging, version)
+        try:
+            os.rename(staging, final_dir)
+        except FileExistsError:
+            raise ManagerError("Magpie version appeared concurrently; refusing to overwrite it") from None
+        _switch_current(tool_root, final_dir)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return version
+
+
+def _resolve_npm_version(package: str, requested_version: str | None) -> str:
+    if requested_version is not None and requested_version != "latest":
+        return _valid_version(requested_version)
+    output = _run_command(["npm", "view", package, "version", "--json"], timeout=60)
+    try:
+        resolved = json.loads(output)
+    except json.JSONDecodeError:
+        resolved = output.strip().strip("\"'")
+    return _valid_version(resolved)
+
+
+def _version_is_reported(output: str, expected: str) -> bool:
+    pattern = re.compile(r"(?<![A-Za-z0-9.+-])v?" + re.escape(expected) + r"(?![A-Za-z0-9.+-])")
+    return pattern.search(output) is not None
+
+
+def _install_npm_tool(tool: str, tool_root: Path, versions: Path, requested_version: str | None) -> str:
+    details = NPM_TOOLS[tool]
+    version = _resolve_npm_version(str(details["package"]), requested_version)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-npm-", dir=versions))
+    staging.chmod(0o700)
+    final_name = f"{version}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+    final_dir = versions / final_name
+    package_spec = f"{details['package']}@{version}"
+    try:
+        _run_command(
+            ["npm", "install", "--prefix", str(staging), "--no-audit", "--no-fund", package_spec],
+            timeout=600,
+        )
+        entry = staging / str(details["entry"])
+        version_file = staging / str(details["version_file"])
+        if not entry.is_file() or not version_file.is_file():
+            raise ManagerError(f"npm installed {tool} without the expected CLI entry point")
+        try:
+            package_metadata = json.loads(version_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise ManagerError(f"installed {tool} package metadata is invalid") from None
+        if not isinstance(package_metadata, dict) or package_metadata.get("version") != version:
+            raise ManagerError(f"installed {tool} package version did not match {version}")
+        reported = _run_command(["node", str(entry), "--version"], timeout=30)
+        if not _version_is_reported(reported, version):
+            raise ManagerError(f"installed {tool} --version did not report {version}")
+        _set_version_metadata(staging, version)
+        os.rename(staging, final_dir)
+        _switch_current(tool_root, final_dir)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return version
+
+
+def _install_agy(tool_root: Path, versions: Path, requested_version: str | None) -> str:
+    if requested_version is not None:
+        raise ManagerError("Ag y version pinning is not supported by the official installer; omit --version")
+    staging = Path(tempfile.mkdtemp(prefix=".staging-agy-", dir=versions))
+    staging.chmod(0o700)
+    installer = staging / "install.sh"
+    staged_bin = staging / "bin"
+    staged_home = staging / ".home"
+    _private_directory(staged_bin)
+    _private_directory(staged_home)
+    child_env = os.environ.copy()
+    child_env["HOME"] = str(staged_home)
+    try:
+        _download_to_file(AGY_INSTALLER_URL, installer, max_bytes=2 * 1024 * 1024)
+        installer.chmod(0o600)
+        # The upstream installer fetches the manifest and verifies the binary's
+        # SHA-512 before copying it into --dir. A nonzero exit leaves `current` alone.
+        _run_command(["bash", str(installer), "--dir", str(staged_bin)], env=child_env, timeout=600)
+        binary = staged_bin / "agy"
+        if not binary.is_file():
+            raise ManagerError("official Ag y installer did not create the expected binary")
+        reported = _run_command([str(binary), "--version"], env=child_env, timeout=30)
+        match = AGY_OUTPUT_VERSION_RE.search(reported)
+        if match is None:
+            raise ManagerError("Ag y --version did not report a recognizable version")
+        version = _valid_version(match.group(1))
+        staged_bin.chmod(0o700)
+        binary.chmod(0o755)
+        _set_version_metadata(staging, version)
+        installer.unlink()
+        shutil.rmtree(staged_home)
+        final_name = f"{version}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+        final_dir = versions / final_name
+        os.rename(staging, final_dir)
+        _switch_current(tool_root, final_dir)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return version
+
+
+def _current_entry(root: Path, tool: str) -> tuple[str, Path] | None:
+    tool_root = root / tool
+    versions = tool_root / "versions"
+    current = tool_root / "current"
+    try:
+        if versions.is_symlink() or not versions.is_dir() or not current.is_symlink():
+            return None
+        link = Path(os.readlink(current))
+        if link.is_absolute() or len(link.parts) != 2 or link.parts[0] != "versions" or link.parts[1] in {".", ".."}:
+            return None
+        version_dir = versions / link.parts[1]
+        if version_dir.is_symlink() or not version_dir.is_dir():
+            return None
+        cli_relative = {
+            "magpie": "magpie",
+            "codex": NPM_TOOLS["codex"]["entry"],
+            "relay": NPM_TOOLS["relay"]["entry"],
+            "agy": "bin/agy",
+        }[tool]
+        if not (version_dir / str(cli_relative)).is_file():
+            return None
+        version_file = version_dir / ".codex-tools-version"
+        version = _valid_version(version_file.read_text(encoding="utf-8").strip())
+        return version, version_dir
+    except (OSError, ManagerError):
+        return None
+
+
+def status(root: Path) -> list[str]:
+    lines: list[str] = []
+    paths = {
+        "magpie": "current/magpie",
+        "codex": "current/node_modules/@openai/codex/bin/codex.js",
+        "relay": "current/node_modules/codex-relay/dist/cli.js",
+        "agy": "current/bin/agy",
+    }
+    for tool in ("magpie", "codex", "relay", "agy"):
+        installed = _current_entry(root, tool)
+        if installed is None:
+            continue
+        version, _ = installed
+        cli_path = root / tool / paths[tool]
+        lines.append(f"{tool}: version={version} path={cli_path}")
+    return lines
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Manage persistent manual updates for Codex tools")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("status", help="show installed versions and managed CLI paths")
+    update = subparsers.add_parser("update", help="install one tool version without restarting services")
+    update.add_argument("tool", choices=("magpie", "codex", "relay", "agy"))
+    update.add_argument("--version", help="requested upstream version (where supported)")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        root = _safe_root()
+        if args.command == "status":
+            for line in status(root):
+                print(line)
+            return 0
+        tool_root, versions = _prepare_tool(root, args.tool)
+        with update_lock(root):
+            if args.tool == "magpie":
+                version = _install_magpie(tool_root, versions, args.version)
+            elif args.tool in NPM_TOOLS:
+                version = _install_npm_tool(args.tool, tool_root, versions, args.version)
+            else:
+                version = _install_agy(tool_root, versions, args.version)
+        print(
+            f"{args.tool} installed at version {version}; running services were not restarted. "
+            "Restart them manually during a maintenance window."
+        )
+        if args.tool == "agy":
+            print("The official Ag y installer verified the downloaded binary with its SHA-512 manifest.")
+        return 0
+    except ManagerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("error: a managed filesystem operation failed; current was not intentionally changed", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

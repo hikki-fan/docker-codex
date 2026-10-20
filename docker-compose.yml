@@ -1,8 +1,10 @@
 services:
   codex:
     image: ${DOCKERHUB_USERNAME:-limairui}/codex-dev:latest
+    pull_policy: missing
     container_name: codex
     restart: unless-stopped
+    entrypoint: ["/bin/bash", "/workspace/docker-codex/docker/start-codex-container.sh"]
     working_dir: /workspace
     tty: true
     stdin_open: true
@@ -13,9 +15,14 @@ services:
       - apparmor=unconfined
     ports:
       - "8787:8787"
+      - "127.0.0.1:3430:3430"
     environment:
       - TZ=Asia/Shanghai
       - HOME=/home/codex
+      - CODEX_MAGPIE_ENABLED=${CODEX_MAGPIE_ENABLED:-true}
+      - CODEX_MAGPIE_DIR=/home/codex/.local/share/codex-magpie
+      - CODEX_TOOLS_ROOT=/home/codex/.local/share/codex-tools
+      - CODEX_SUPERVISOR_ENABLED=${CODEX_SUPERVISOR_ENABLED:-true}
       - HTTP_PROXY=${CODEX_HTTP_PROXY:-http://192.168.50.161:7897}
       - HTTPS_PROXY=${CODEX_HTTPS_PROXY:-http://192.168.50.161:7897}
       - NO_PROXY=${CODEX_NO_PROXY:-localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8}
