@@ -20,6 +20,9 @@ copy_helper() {
 }
 copy_helper codex-real-wrapper /usr/local/bin/codex-real
 copy_helper codex-wrapper /opt/codex/bin/codex
+copy_helper codex-terminal-guard.py /opt/codex/bin/codex-terminal-guard.py
+copy_helper codex-terminal-idle.cjs /opt/codex/bin/codex-terminal-idle.cjs
+copy_helper codex-terminal-proxy.cjs /opt/codex/bin/codex-terminal-proxy.cjs
 copy_helper codex-relay-wrapper /opt/codex/bin/codex-relay
 copy_helper agy-wrapper /opt/codex/bin/agy
 copy_helper magpie-wrapper /opt/codex/bin/magpie

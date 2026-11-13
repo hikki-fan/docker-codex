@@ -1,0 +1,47 @@
+#!/bin/sh
+# Run on the Docker HOST over SSH. Docker exec's PTY alone cannot detect SSH loss.
+set -eu
+# POSIX shells may replace stdin with /dev/null for background commands.
+# Preserve the caller's terminal before launching the Docker attachment.
+exec 3<&0
+container="${CODEX_CONTAINER:-codex}"
+lease=$(docker exec "$container" mktemp /tmp/codex-terminal-XXXXXXXX)
+heartbeat=""
+attachment=""
+cleanup() {
+  trap - 0 HUP TERM
+  if [ -n "$heartbeat" ]; then
+    kill "$heartbeat" 2>/dev/null || true
+    wait "$heartbeat" 2>/dev/null || true
+  fi
+  if [ -n "$attachment" ]; then
+    kill "$attachment" 2>/dev/null || true
+    wait "$attachment" 2>/dev/null || true
+  fi
+  docker exec "$container" rm -f -- "$lease" >/dev/null 2>&1 || true
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 143' TERM
+owner=$$
+(
+  nap=""
+  trap 'if [ -n "$nap" ]; then kill "$nap" 2>/dev/null || true; wait "$nap" 2>/dev/null || true; fi; exit 0' HUP TERM
+  while kill -0 "$owner" 2>/dev/null; do
+    docker exec "$container" touch -- "$lease" >/dev/null 2>&1 || exit
+    sleep 10 & nap=$!
+    wait "$nap" || exit
+    nap=""
+  done
+) >/dev/null 2>&1 &
+heartbeat=$!
+# Keep the host shell as signal owner while Docker uses the foreground terminal.
+# Call with no args for a container shell, or with `resume [THREAD_ID]`.
+if [ "$#" -eq 0 ]; then
+  docker exec -it -e CODEX_TERMINAL_LEASE="$lease" "$container" bash <&3 &
+else
+  docker exec -it -e CODEX_TERMINAL_LEASE="$lease" "$container" codex "$@" <&3 &
+fi
+attachment=$!
+wait "$attachment"
+attachment=""

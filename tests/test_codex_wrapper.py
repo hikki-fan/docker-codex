@@ -43,6 +43,10 @@ class CodexWrapperTests(unittest.TestCase):
         for args in (["app-server", "--listen", "unix://"], ["exec", "resume", "thread-id"], ["--version"]):
             self.assertEqual(self.invoke(*args), args)
 
+    def test_managed_shell_plain_codex_uses_shared_resume(self):
+        self.env['CODEX_TERMINAL_LEASE'] = '/tmp/test-lease'
+        self.assertEqual(self.invoke(), ['resume', '--remote', 'unix://'])
+
     def test_npm_bin_replacement_does_not_bypass_wrapper(self):
         stable = self.root / "stable"
         npm_bin = self.root / "npm-bin"

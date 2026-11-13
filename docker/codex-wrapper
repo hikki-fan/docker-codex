@@ -4,6 +4,19 @@ set -e
 # npm owns /usr/local/bin/codex and replaces it during upgrades. This wrapper
 # lives earlier on PATH and calls the package entry point without recursing.
 CODEX_REAL="${CODEX_WRAPPER_REAL_BIN:-/usr/local/bin/codex-real}"
+managed_remote=0
+
+run_codex() {
+  if [[ "${managed_remote:-0}" == 1 && -n "${CODEX_TERMINAL_LEASE:-}" && -t 0 && -t 1 ]]; then
+    exec python3 /opt/codex/bin/codex-terminal-guard.py "$CODEX_REAL" "$@"
+  fi
+  exec "$CODEX_REAL" "$@"
+}
+
+# The managed SSH shell uses the shared server even for plain `codex`.
+if [[ -n "${CODEX_TERMINAL_LEASE:-}" && $# == 0 ]]; then
+  set -- resume
+fi
 
 # Attach terminal resume commands to Relay's shared Unix-socket app-server.
 # Keep an explicitly supplied --remote endpoint unchanged.
@@ -18,8 +31,9 @@ if [[ "${1:-}" == "resume" ]]; then
 
   if (( ! has_remote )); then
     shift
-    exec "$CODEX_REAL" resume --remote unix:// "$@"
+    managed_remote=1
+    run_codex resume --remote unix:// "$@"
   fi
 fi
 
-exec "$CODEX_REAL" "$@"
+run_codex "$@"

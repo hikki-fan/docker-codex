@@ -54,6 +54,9 @@ RUN npm_config_proxy="${HTTP_PROXY}" \
 # supervisor's non-interactive commands.
 COPY docker/codex-real-wrapper /usr/local/bin/codex-real
 COPY docker/codex-wrapper /opt/codex/bin/codex
+COPY docker/codex-terminal-guard.py /opt/codex/bin/codex-terminal-guard.py
+COPY docker/codex-terminal-idle.cjs /opt/codex/bin/codex-terminal-idle.cjs
+COPY docker/codex-terminal-proxy.cjs /opt/codex/bin/codex-terminal-proxy.cjs
 COPY docker/codex-relay-wrapper /opt/codex/bin/codex-relay
 COPY docker/agy-wrapper /opt/codex/bin/agy
 COPY docker/magpie-wrapper /opt/codex/bin/magpie

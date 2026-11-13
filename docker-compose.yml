@@ -4,6 +4,7 @@ services:
     pull_policy: missing
     container_name: codex
     restart: unless-stopped
+    init: true
     entrypoint: ["/bin/bash", "/workspace/docker-codex/docker/start-codex-container.sh"]
     working_dir: /workspace
     tty: true
