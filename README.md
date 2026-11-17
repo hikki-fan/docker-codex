@@ -2,9 +2,17 @@
 
 Build a personal Docker image for the OpenAI Codex CLI and Codex Relay, then publish it to Docker Hub.
 
-The image installs `@openai/codex`, `codex-relay`, Google Antigravity CLI (`agy`), GitHub CLI (`gh`), Vicoa CLI (`vicoa`, pinned to 1.9.10), and common terminal tools. GitHub Actions checks the latest upstream versions every day and rebuilds the Docker image when Codex, Codex Relay, or Antigravity CLI changes. Run `vicoa` in an interactive terminal to complete its own setup; installing it does not configure account access.
+The image installs `@openai/codex`, `codex-relay`, DeepSeek Harness (`dsh`, pinned to `0.2.2-rc.1`), Google Antigravity CLI (`agy`), GitHub CLI (`gh`), Vicoa CLI (`vicoa`, pinned to 1.9.10), and common terminal tools. GitHub Actions checks upstream versions on manual runs and relevant pushes to `main`, then rebuilds when an upstream version or image source changes. Run `vicoa` in an interactive terminal to complete its own setup; installing it does not configure account access.
 
 It also includes common terminal tools and `bubblewrap` for sandbox support. The compose file grants the container the extra sandbox permissions bubblewrap needs inside Docker.
+
+## DeepSeek Harness
+
+The image includes DeepSeek Harness (`dsh`), pinned to `0.2.2-rc.1` through
+`DSH_VERSION`. It requires Node.js 24; change the Dockerfile ARG to pin another
+release. Credentials are not baked into the image, and installing `dsh` does
+not configure authentication. Its auth state can persist through the existing
+`/home/codex` mount.
 
 ## Files
 

@@ -1,7 +1,8 @@
-FROM node:22-bookworm
+FROM node:24-bookworm
 
 ARG CODEX_VERSION
 ARG CODEX_RELAY_VERSION=latest
+ARG DSH_VERSION=0.2.2-rc.1
 ARG AGY_VERSION=latest
 ARG VICOA_VERSION=1.9.10
 ARG HTTP_PROXY
@@ -47,7 +48,8 @@ RUN npm_config_proxy="${HTTP_PROXY}" \
     npm_config_noproxy="${NO_PROXY}" \
     npm_config_fetch_timeout=60000 \
     npm_config_fetch_retries=2 \
-    npm install -g @openai/codex@${CODEX_VERSION} codex-relay@${CODEX_RELAY_VERSION}
+    npm install -g @openai/codex@${CODEX_VERSION} codex-relay@${CODEX_RELAY_VERSION} @deepseek-ai/dsh@${DSH_VERSION} && \
+    dsh --version
 
 # Keep the shared-session entry point outside npm's global bin directory so
 # an in-container npm upgrade cannot overwrite it. Retain codex-real for the
@@ -95,6 +97,7 @@ LABEL org.opencontainers.image.title="codex-dev"
 LABEL org.opencontainers.image.description="OpenAI Codex CLI development container"
 LABEL org.opencontainers.image.version="${CODEX_VERSION}"
 LABEL org.opencontainers.image.codex-relay.version="${CODEX_RELAY_VERSION}"
+LABEL org.opencontainers.image.dsh.version="${DSH_VERSION}"
 LABEL org.opencontainers.image.antigravity.version="${AGY_VERSION}"
 
 EXPOSE 8787
