@@ -14,6 +14,46 @@ release. Credentials are not baked into the image, and installing `dsh` does
 not configure authentication. Its auth state can persist through the existing
 `/home/codex` mount.
 
+To enable its HTTPS Web UI, set `DSH_WEB_ENABLED=true` in Compose. The default
+host binding is `127.0.0.1:3080`; use an SSH tunnel for remote access, or set
+`DSH_WEB_HOST_BIND` to a specific trusted LAN address and
+`DSH_WEB_PUBLIC_URL` to the matching browser origin (for example,
+`https://192.168.1.10:3080/`). DSH listens on a concrete container IP, not
+`0.0.0.0`. The helper generates a self-signed certificate for that origin only
+when neither default TLS file exists. It preserves an existing pair.
+To supply a trusted pair use `DSH_WEB_TLS_CERT` and `DSH_WEB_TLS_KEY` in the
+container environment. When changing the browser hostname, provide a
+certificate that matches it.
+
+```bash
+docker exec codex codex-dsh-web access  # private one-process login URL
+docker exec -d codex codex-dsh-web serve  # optional manual startup
+```
+
+Configuration and sessions remain in `/home/codex/.dsh`. The TLS files and
+protected startup log stay in `/home/codex/.local/share/dsh-web`. Do not share
+the launch URL or publish the port to the internet. If an older sidecar
+already owns host port 3080, stop only that sidecar before recreating Codex.
+
+## T3 Code
+
+The image includes T3 Code `0.1.11`. Set `T3CODE_ENABLED=true` to start it on
+port `3773` with settings under `/home/codex/.t3`. A persisted
+`/home/codex/.local/bin/t3` takes precedence over the bundled binary; an
+explicit `T3CODE_BIN` overrides both. The sample Compose binds host port 3773
+to loopback unless `T3CODE_HOST_BIND` is changed.
+
+```bash
+docker exec codex t3 --version
+docker exec -it codex t3 pair  # keep pairing details private
+```
+
+Magpie is optional. To configure its T3 integration on demand, run
+`docker exec codex magpie t3code provider magpie`. This writes T3-specific
+provider instances and a model catalog; it is not run automatically and does
+not change the terminal Codex model list. Use
+`magpie visible t3code <provider-or-family>` to narrow T3's Magpie catalog.
+
 ## Files
 
 ```text
@@ -357,10 +397,10 @@ The Compose entrypoint loads the helper scripts from the persistent
 The base image still supplies fallback Codex/Relay/AGY binaries until each tool
 has been installed into the persistent tool directory.
 
-Install and start Magpie once (not on every container start):
+Magpie `0.1.4710` is bundled as a fallback. A version installed in the
+persistent tool directory takes precedence. To start or update manually:
 
 ```bash
-codex-tools update magpie
 codex-magpie start
 codex-magpie status
 ```
@@ -369,8 +409,11 @@ Magpie lives under `/home/codex/.local/share/codex-tools/magpie`; its isolated
 settings/cache and protected Web key live under
 `/home/codex/.local/share/codex-magpie`. This is covered by the existing home
 bind mount. The settings disable automatic updates/downloads, automatic update
-restarts and account discovery. Installation does not import accounts, change
-Codex authentication, or route existing sessions through Magpie.
+restarts, but do not change Magpie's account-discovery preference. Discovery
+follows Magpie's default and any existing operator settings; the service and
+wrapper do not set `MAGPIE_NO_ACCOUNTS` by default. Existing settings are left
+untouched. Installation does not import accounts, configure an account pool,
+change Codex authentication, or route existing sessions through Magpie.
 
 The gateway listens on container loopback port 3425. Only the Web interface is
 published, to **host loopback only**, at `127.0.0.1:3430`. From your computer:
@@ -423,8 +466,8 @@ Base OS/Node security updates still require occasional image maintenance.
 
 ### Later account-pool migration
 
-This install leaves account discovery off. Before activating a Magpie account
-pool, validate the accounts, routing cap, long-history compaction and tool calls.
+Before choosing to activate a Magpie account pool, validate the accounts,
+routing cap, long-history compaction and tool calls.
 Then stop the old supervisor and set `CODEX_SUPERVISOR_ENABLED=false` in Compose
 so a restart cannot re-enable its switching. Set `CODEX_WARMUP_ENABLED=false`
 when migrating warm-up ownership too. Never run two account-switch owners.

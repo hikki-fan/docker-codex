@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+
+# Pinned upstream Linux x86_64 release artifacts and SHA-256 digests.
+[[ "$(uname -m)" == x86_64 ]]
+tmp=$(mktemp -d)
+trap 'rm -f -- "$tmp/t3.tar.gz" "$tmp/magpie"; rmdir -- "$tmp"' EXIT
+curl -fsSL --retry 3 --max-time 240 \
+  https://github.com/pingdotgg/t3code/releases/download/v0.1.11/t3-0.1.11-linux-x64.tar.gz \
+  -o "$tmp/t3.tar.gz"
+echo "2b691c07f5bcb5adea4a863d5324aae7db21bd6d82280cec7787836dcaa013e1  $tmp/t3.tar.gz" | sha256sum -c -
+mkdir -p /opt/t3code
+tar --no-same-owner -xzf "$tmp/t3.tar.gz" -C /opt/t3code
+# The executable needs the client and resource-monitor directories beside it.
+t3=$(find /opt/t3code -type f -name t3 -executable -print -quit)
+test -n "$t3"
+ln -s "$t3" /usr/local/bin/t3
+t3 --version | grep -Fx 't3 v0.1.11'
+
+curl -fsSL --retry 3 --max-time 240 \
+  https://github.com/yetone/magpie-releases/releases/download/v0.1.4710/magpie-cli-linux-amd64 \
+  -o "$tmp/magpie"
+echo "07853f9fd87977aa5b0c7b6410602d5563937127b8ace7efe568f923e241e6df  $tmp/magpie" | sha256sum -c -
+install -m 755 "$tmp/magpie" /usr/local/bin/magpie-bundled
+DO_NOT_TRACK=1 /usr/local/bin/magpie-bundled --version | grep -Fx 'magpie 0.1.4710'

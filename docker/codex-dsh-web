@@ -1,0 +1,89 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+state="${DSH_WEB_STATE_DIR:-$HOME/.local/share/dsh-web}"
+export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+public_url="${DSH_WEB_PUBLIC_URL:-https://localhost:3080/}"
+cert="${DSH_WEB_TLS_CERT:-$state/tls.crt}"
+key="${DSH_WEB_TLS_KEY:-$state/tls.key}"
+port=3080
+
+if [[ ! "$public_url" =~ ^https://([a-zA-Z0-9][a-zA-Z0-9.-]*)(:[0-9]{1,5})?/?$ ]]; then
+  echo 'DSH_WEB_PUBLIC_URL must be an HTTPS origin (IPv4 or DNS name).' >&2
+  exit 64
+fi
+public_host="${BASH_REMATCH[1]}"
+authority="${public_url#https://}"
+authority="${authority%/}"
+public_url="https://$authority/"
+
+if [[ -L "$state" ]]; then
+  echo 'DSH Web state directory cannot be a symlink.' >&2
+  exit 64
+fi
+mkdir -p -- "$state"
+chmod 700 -- "$state"
+
+case "${1:-serve}" in
+  serve)
+    exec 9>"$state/start.lock"
+    if ! flock -n 9; then exit 0; fi
+    bind_address="${DSH_WEB_BIND_ADDRESS:-}"
+    if [[ -z "$bind_address" ]]; then
+      bind_address=$(getent ahostsv4 "$(hostname)" | awk 'NR==1 {print $1}') || bind_address=
+    fi
+    if [[ -z "$bind_address" || "$bind_address" == 0.0.0.0 ]]; then
+      echo 'DSH Web needs a concrete local IPv4 address.' >&2
+      exit 1
+    fi
+    if [[ "$cert" == "$state/tls.crt" && "$key" == "$state/tls.key" &&
+          ! -e "$cert" && ! -L "$cert" && ! -e "$key" && ! -L "$key" ]]; then
+      san="DNS:$public_host"
+      if [[ "$public_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then san="IP:$public_host"; fi
+      scratch=$(mktemp -d "$state/.tls.XXXXXX")
+      trap 'rm -f -- "$scratch/key" "$scratch/cert"; rmdir -- "$scratch"' EXIT
+      openssl req -x509 -newkey rsa:3072 -sha256 -days 365 -nodes \
+        -subj "/CN=$public_host" -addext "subjectAltName=$san" \
+        -addext 'extendedKeyUsage=serverAuth' \
+        -keyout "$scratch/key" -out "$scratch/cert" >/dev/null 2>&1
+      install -m 600 -- "$scratch/key" "$key"
+      install -m 600 -- "$scratch/cert" "$cert"
+      rm -- "$scratch/key" "$scratch/cert"
+      rmdir -- "$scratch"
+      trap - EXIT
+    fi
+    if [[ ! -s "$cert" || ! -s "$key" ]]; then
+      echo 'DSH Web certificate/key pair is missing; refusing plaintext startup.' >&2
+      exit 1
+    fi
+    chmod 600 "$state/start.log" 2>/dev/null || true
+    exec "${DSH_WEB_BIN:-/usr/local/bin/dsh}" web --host "$bind_address" --port "$port" --no-open \
+      --public-url "$public_url" --trusted-host "$authority" \
+      --tls-cert "$cert" --tls-key "$key" >"$state/start.log" 2>&1
+    ;;
+  access)
+    exec 9<>"$state/start.lock"
+    if flock -n 9; then
+      echo 'DSH Web is not running; run codex-dsh-web serve first.' >&2
+      exit 1
+    fi
+    python3 -c '
+from pathlib import Path
+import re, sys
+root, path = sys.argv[1:]
+try:
+    log = Path(path).read_text(errors="replace")
+except OSError:
+    log = ""
+links = re.findall(re.escape(root) + r"\?token=[a-zA-Z0-9_~-]+", log)
+if not links:
+    sys.exit("DSH Web does not have a launch link yet; inspect its protected startup log.")
+print(links[-1])
+' "$public_url" "$state/start.log"
+    ;;
+  *)
+    echo 'Usage: codex-dsh-web {serve|access}' >&2
+    exit 64
+    ;;
+esac

@@ -169,11 +169,37 @@ elif [ "${CODEX_WARMUP_ENABLED:-true}" != "true" ] && [ -f "${WARMUP_SCHEDULER_P
 fi
 
 if [ "${CODEX_MAGPIE_ENABLED:-false}" = "true" ]; then
-  if [ -x "${CODEX_TOOLS_ROOT:-/home/codex/.local/share/codex-tools}/magpie/current/magpie" ]; then
-    codex-magpie start || echo "Magpie startup failed; existing Codex services remain available" >&2
-  else
-    echo "Magpie not installed; run codex-tools update magpie then codex-magpie start" >&2
-  fi
+  codex-magpie start || echo "Magpie startup failed; existing Codex services remain available" >&2
+fi
+
+if [ "${DSH_WEB_ENABLED:-false}" = "true" ]; then
+  codex-dsh-web serve &
+fi
+
+T3_BIN="${T3CODE_BIN:-}"
+if [ -z "$T3_BIN" ]; then
+  T3_BIN=/home/codex/.local/bin/t3
+  if [ ! -x "$T3_BIN" ]; then T3_BIN=/usr/local/bin/t3; fi
+fi
+export T3CODE_HOME="${T3CODE_HOME:-/home/codex/.t3}"
+T3_HOME="$T3CODE_HOME"
+T3_HOST="${T3CODE_HOST:-0.0.0.0}"
+T3_PORT="${T3CODE_PORT:-3773}"
+T3_WORKDIR="${T3CODE_WORKDIR:-/workspace}"
+T3_LOG="${T3_HOME}/t3-serve.log"
+T3_PID="${T3_HOME}/t3-serve.pid"
+if [ "${T3CODE_ENABLED:-false}" = "true" ] && [ -x "${T3_BIN}" ]; then
+  (
+    umask 077
+    mkdir -p "${T3_HOME}" && touch "${T3_LOG}" && chmod 600 "${T3_LOG}" || exit 1
+    if [ ! -f "${T3_PID}" ] || \
+       ! pid_is_expected "$(cat "${T3_PID}" 2>/dev/null || true)" "t3 serve"; then
+      setsid "${T3_BIN}" serve --host "${T3_HOST}" --port "${T3_PORT}" --lan "${T3_WORKDIR}" \
+        </dev/null >>"${T3_LOG}" 2>&1 &
+      echo $! >"${T3_PID}"
+      chmod 600 "${T3_PID}"
+    fi
+  ) || echo "T3 Code startup failed; existing Codex services remain available" >&2
 fi
 
 tmux has-session -t codex 2>/dev/null ||

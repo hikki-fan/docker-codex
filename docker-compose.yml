@@ -17,12 +17,17 @@ services:
     ports:
       - "8787:8787"
       - "127.0.0.1:3430:3430"
+      - "${T3CODE_HOST_BIND:-127.0.0.1}:3773:3773"
+      - "${DSH_WEB_HOST_BIND:-127.0.0.1}:3080:3080"
     environment:
       - TZ=Asia/Shanghai
       - HOME=/home/codex
       - CODEX_MAGPIE_ENABLED=${CODEX_MAGPIE_ENABLED:-true}
       - CODEX_MAGPIE_DIR=/home/codex/.local/share/codex-magpie
       - CODEX_TOOLS_ROOT=/home/codex/.local/share/codex-tools
+      - T3CODE_ENABLED=${T3CODE_ENABLED:-false}
+      - DSH_WEB_ENABLED=${DSH_WEB_ENABLED:-false}
+      - DSH_WEB_PUBLIC_URL=${DSH_WEB_PUBLIC_URL:-https://localhost:3080/}
       - CODEX_SUPERVISOR_ENABLED=${CODEX_SUPERVISOR_ENABLED:-true}
       - HTTP_PROXY=${CODEX_HTTP_PROXY:-http://192.168.50.161:7897}
       - HTTPS_PROXY=${CODEX_HTTPS_PROXY:-http://192.168.50.161:7897}

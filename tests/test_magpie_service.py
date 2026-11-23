@@ -39,6 +39,7 @@ class MagpieServiceTests(unittest.TestCase):
             "CODEX_TOOLS_ROOT": str(self.tools),
             "HOME": str(self.root / "original-home"),
         })
+        self.env.pop("MAGPIE_NO_ACCOUNTS", None)
         Path(self.env["HOME"]).mkdir()
 
     def service_env(self):
@@ -58,7 +59,7 @@ class MagpieServiceTests(unittest.TestCase):
             check=check,
         )
 
-    def test_prepare_isolates_xdg_and_disables_account_discovery_updates(self):
+    def test_prepare_isolates_xdg_and_disables_automatic_updates_only(self):
         with self.service_env():
             base, child_env, key = service.prepare()
 
@@ -67,12 +68,12 @@ class MagpieServiceTests(unittest.TestCase):
         self.assertEqual(child_env["XDG_CACHE_HOME"], str(self.state / "cache"))
         self.assertEqual(child_env["XDG_DATA_HOME"], str(self.state / "data"))
         self.assertEqual(child_env["XDG_STATE_HOME"], str(self.state / "state"))
-        self.assertEqual(child_env["MAGPIE_NO_ACCOUNTS"], "1")
+        self.assertNotIn("MAGPIE_NO_ACCOUNTS", child_env)
         self.assertEqual(child_env["MAGPIE_ADDR"], "127.0.0.1:3425")
         self.assertEqual(child_env["HOME"], self.env["HOME"])
 
         settings = json.loads((self.state / "config/magpie/settings.json").read_text())
-        self.assertTrue(settings["noAccountDiscovery"])
+        self.assertNotIn("noAccountDiscovery", settings)
         self.assertTrue(settings["noAutoUpdate"])
         self.assertTrue(settings["noAutoDownload"])
         self.assertFalse(settings["autoRestart"])
@@ -80,11 +81,44 @@ class MagpieServiceTests(unittest.TestCase):
             self.assertTrue((self.state / name).is_dir())
         self.assertGreaterEqual(len(key), 16)
 
+    def test_prepare_preserves_explicit_account_discovery_env(self):
+        for value in ("1", "0"):
+            with self.subTest(value=value):
+                self.env["MAGPIE_NO_ACCOUNTS"] = value
+                with self.service_env():
+                    _, child_env, _ = service.prepare()
+                self.assertEqual(child_env["MAGPIE_NO_ACCOUNTS"], value)
+
+    def test_status_uses_magpie_account_discovery_env_semantics(self):
+        self.install_fake_magpie(
+            "import sys\n"
+            "sys.exit(0 if sys.argv[1:] == ['healthcheck'] else 0)\n"
+        )
+        cases = (
+            (None, True),
+            ("", True),
+            ("0", True),
+            ("false", True),
+            (" FALSE ", True),
+            ("1", False),
+            ("true", False),
+            ("off", False),
+            ("no", False),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                if value is None:
+                    self.env.pop("MAGPIE_NO_ACCOUNTS", None)
+                else:
+                    self.env["MAGPIE_NO_ACCOUNTS"] = value
+                status = json.loads(self.run_service("status").stdout)
+                self.assertEqual(status["account_discovery"], expected)
+
     def test_web_key_is_private_and_existing_key_and_settings_are_preserved(self):
         config = self.state / "config/magpie"
         config.mkdir(parents=True)
         settings_path = config / "settings.json"
-        original_settings = b'{"operatorSetting":"keep exactly"}\n'
+        original_settings = b'{"operatorSetting":"keep exactly","noAccountDiscovery":true}\n'
         settings_path.write_bytes(original_settings)
         key_path = self.state / "web.key"
         key_path.write_text("operator-supplied-test-key\n")
@@ -225,42 +259,47 @@ class MagpieWrapperTests(unittest.TestCase):
                 "print(json.dumps(sys.argv[1:]))\n"
             )
             binary.chmod(0o755)
-            env = os.environ.copy()
-            env.update({
-                "CODEX_MAGPIE_DIR": str(base),
-                "CODEX_TOOLS_ROOT": str(tools),
-                "HOME": str(home),
-                "XDG_CONFIG_HOME": "/old/config",
-                "XDG_CACHE_HOME": "/old/cache",
-                "XDG_DATA_HOME": "/old/data",
-                "XDG_STATE_HOME": "/old/state",
-                "MAGPIE_NO_ACCOUNTS": "0",
-                "MAGPIE_ADDR": "0.0.0.0:9999",
-                "DO_NOT_TRACK": "0",
-                "MAGPIE_WEB_KEY": "must-not-be-injected-by-wrapper",
-                "KEEP_ME": "unchanged",
-            })
+            for account_setting in (None, "1", "0"):
+                with self.subTest(account_setting=account_setting):
+                    env = os.environ.copy()
+                    env.update({
+                        "CODEX_MAGPIE_DIR": str(base),
+                        "CODEX_TOOLS_ROOT": str(tools),
+                        "HOME": str(home),
+                        "XDG_CONFIG_HOME": "/old/config",
+                        "XDG_CACHE_HOME": "/old/cache",
+                        "XDG_DATA_HOME": "/old/data",
+                        "XDG_STATE_HOME": "/old/state",
+                        "MAGPIE_ADDR": "0.0.0.0:9999",
+                        "DO_NOT_TRACK": "0",
+                        "MAGPIE_WEB_KEY": "must-not-be-injected-by-wrapper",
+                        "KEEP_ME": "unchanged",
+                    })
+                    if account_setting is None:
+                        env.pop("MAGPIE_NO_ACCOUNTS", None)
+                    else:
+                        env["MAGPIE_NO_ACCOUNTS"] = account_setting
 
-            result = subprocess.run(
-                ["bash", str(WRAPPER), "--version"], env=env,
-                capture_output=True, text=True, check=True, timeout=10,
-            )
-            lines = result.stdout.splitlines()
-            observed = json.loads(lines[0])
-            self.assertEqual(json.loads(lines[1]), ["--version"])
-            self.assertEqual(observed["HOME"], str(home))
-            self.assertEqual(observed["XDG_CONFIG_HOME"], str(base / "config"))
-            self.assertEqual(observed["XDG_CACHE_HOME"], str(base / "cache"))
-            self.assertEqual(observed["XDG_DATA_HOME"], str(base / "data"))
-            self.assertEqual(observed["XDG_STATE_HOME"], str(base / "state"))
-            self.assertEqual(observed["MAGPIE_NO_ACCOUNTS"], "0")
-            self.assertEqual(observed["MAGPIE_ADDR"], "0.0.0.0:9999")
-            self.assertEqual(observed["DO_NOT_TRACK"], "1")
-            self.assertEqual(observed["MAGPIE_WEB_KEY"], "must-not-be-injected-by-wrapper")
-            self.assertEqual(observed["KEEP_ME"], "unchanged")
-            self.assertEqual(sorted(path.name for path in home.iterdir()), before)
-            self.assertEqual(marker.read_text(), "leave me alone")
-            self.assertFalse(base.exists(), "the wrapper should only configure env, not mutate state")
+                    result = subprocess.run(
+                        ["bash", str(WRAPPER), "--version"], env=env,
+                        capture_output=True, text=True, check=True, timeout=10,
+                    )
+                    lines = result.stdout.splitlines()
+                    observed = json.loads(lines[0])
+                    self.assertEqual(json.loads(lines[1]), ["--version"])
+                    self.assertEqual(observed["HOME"], str(home))
+                    self.assertEqual(observed["XDG_CONFIG_HOME"], str(base / "config"))
+                    self.assertEqual(observed["XDG_CACHE_HOME"], str(base / "cache"))
+                    self.assertEqual(observed["XDG_DATA_HOME"], str(base / "data"))
+                    self.assertEqual(observed["XDG_STATE_HOME"], str(base / "state"))
+                    self.assertEqual(observed["MAGPIE_NO_ACCOUNTS"], account_setting)
+                    self.assertEqual(observed["MAGPIE_ADDR"], "0.0.0.0:9999")
+                    self.assertEqual(observed["DO_NOT_TRACK"], "1")
+                    self.assertEqual(observed["MAGPIE_WEB_KEY"], "must-not-be-injected-by-wrapper")
+                    self.assertEqual(observed["KEEP_ME"], "unchanged")
+                    self.assertEqual(sorted(path.name for path in home.iterdir()), before)
+                    self.assertEqual(marker.read_text(), "leave me alone")
+                    self.assertFalse(base.exists(), "the wrapper should only configure env, not mutate state")
 
 
 if __name__ == "__main__":

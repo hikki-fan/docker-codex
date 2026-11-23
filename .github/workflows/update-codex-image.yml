@@ -13,6 +13,7 @@ on:
       - main
     paths:
       - Dockerfile
+      - .dockerignore
       - docker/**
       - .github/workflows/update-codex-image.yml
 
@@ -154,6 +155,7 @@ jobs:
             AGY_VERSION=${{ steps.latest.outputs.latest_agy_version }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
             ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}
             ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:codex-${{ steps.latest.outputs.latest_version }}-relay-${{ steps.latest.outputs.latest_relay_version }}
           labels: |
@@ -163,6 +165,7 @@ jobs:
             org.opencontainers.image.codex-relay.version=${{ steps.latest.outputs.latest_relay_version }}
             org.opencontainers.image.antigravity.version=${{ steps.latest.outputs.latest_agy_version }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Summary
         run: |

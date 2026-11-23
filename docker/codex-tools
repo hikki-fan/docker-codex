@@ -244,7 +244,8 @@ def _magpie_release() -> tuple[str, str, str, int | None]:
     asset = assets.get(_magpie_platform_asset()) if isinstance(assets, dict) else None
     if not isinstance(asset, dict):
         raise ManagerError("Magpie latest metadata has no matching Linux CLI asset")
-    url = asset.get("url")
+    # New releases may advertise a relay URL separately from the GitHub asset.
+    url = asset.get("github") or asset.get("url")
     parsed_url = urllib.parse.urlparse(url) if isinstance(url, str) else None
     if (
         parsed_url is None
@@ -295,7 +296,6 @@ def _install_magpie(tool_root: Path, versions: Path, requested_version: str | No
                 "HOME": str(isolated_home),
                 "XDG_CONFIG_HOME": str(isolated_home / ".config"),
                 "XDG_DATA_HOME": str(isolated_home / ".local/share"),
-                "MAGPIE_NO_ACCOUNTS": "1",
                 "DO_NOT_TRACK": "1",
             }
         )

@@ -150,9 +150,10 @@ def test_npm_update_uses_local_prefix_and_validates_package_version(tmp_path: Pa
     assert (tool_root / "current").is_symlink()
 
 
-def test_magpie_version_probe_uses_isolated_home_and_disables_accounts(
+def test_magpie_version_probe_uses_isolated_home_without_account_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    monkeypatch.delenv("MAGPIE_NO_ACCOUNTS", raising=False)
     root = tmp_path / "managed-tools"
     tool_root, versions = codex_tools._prepare_tool(root, "magpie")
     payload = b"verified magpie payload"
@@ -189,11 +190,12 @@ def test_magpie_version_probe_uses_isolated_home_and_disables_accounts(
     assert args[-1] == "--version"
     assert timeout == 30
     assert env is not None
-    assert env["MAGPIE_NO_ACCOUNTS"] == "1"
+    assert "MAGPIE_NO_ACCOUNTS" not in env
     assert env["DO_NOT_TRACK"] == "1"
     assert env["HOME"] != os.environ.get("HOME")
     assert env["XDG_CONFIG_HOME"].startswith(env["HOME"])
     assert os.readlink(tool_root / "current") == "versions/0.1.9"
+    assert not (versions / "0.1.9" / ".home").exists()
 
 
 def test_status_cli_reports_managed_versions_and_paths_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):

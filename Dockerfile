@@ -27,6 +27,8 @@ RUN apt update && \
       tmux \
       ca-certificates \
       openssh-client \
+      openssl \
+      util-linux \
       bash \
       less \
       ripgrep \
@@ -51,6 +53,9 @@ RUN npm_config_proxy="${HTTP_PROXY}" \
     npm install -g @openai/codex@${CODEX_VERSION} codex-relay@${CODEX_RELAY_VERSION} @deepseek-ai/dsh@${DSH_VERSION} && \
     dsh --version
 
+COPY docker/install-web-tools /tmp/install-web-tools
+RUN bash /tmp/install-web-tools && rm /tmp/install-web-tools
+
 # Keep the shared-session entry point outside npm's global bin directory so
 # an in-container npm upgrade cannot overwrite it. Retain codex-real for the
 # supervisor's non-interactive commands.
@@ -64,8 +69,9 @@ COPY docker/agy-wrapper /opt/codex/bin/agy
 COPY docker/magpie-wrapper /opt/codex/bin/magpie
 COPY docker/codex-tools /usr/local/bin/codex-tools
 COPY docker/codex-magpie /usr/local/bin/codex-magpie
+COPY docker/codex-dsh-web /usr/local/bin/codex-dsh-web
 COPY docker/codex-path.sh /etc/profile.d/codex-path.sh
-RUN chmod +x /opt/codex/bin/* /usr/local/bin/codex-real /usr/local/bin/codex-tools /usr/local/bin/codex-magpie
+RUN chmod +x /opt/codex/bin/* /usr/local/bin/codex-real /usr/local/bin/codex-tools /usr/local/bin/codex-magpie /usr/local/bin/codex-dsh-web
 
 # AGY_VERSION invalidates this layer when the upstream Antigravity release changes.
 # The official installer downloads the current binary and verifies its SHA-512 digest.
@@ -98,8 +104,10 @@ LABEL org.opencontainers.image.description="OpenAI Codex CLI development contain
 LABEL org.opencontainers.image.version="${CODEX_VERSION}"
 LABEL org.opencontainers.image.codex-relay.version="${CODEX_RELAY_VERSION}"
 LABEL org.opencontainers.image.dsh.version="${DSH_VERSION}"
+LABEL org.opencontainers.image.t3code.version="0.1.11"
+LABEL org.opencontainers.image.magpie.version="0.1.4710"
 LABEL org.opencontainers.image.antigravity.version="${AGY_VERSION}"
 
-EXPOSE 8787
+EXPOSE 8787 3080 3430 3773
 
 CMD ["start-codex-container"]
