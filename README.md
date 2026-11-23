@@ -43,6 +43,11 @@ port `3773` with settings under `/home/codex/.t3`. A persisted
 explicit `T3CODE_BIN` overrides both. The sample Compose binds host port 3773
 to loopback unless `T3CODE_HOST_BIND` is changed.
 
+T3 starts with `NODE_USE_ENV_PROXY=1` by default so provider requests, including
+Grok usage limits, honor `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. Existing
+proxy addresses are preserved. Set `NODE_USE_ENV_PROXY=0` to opt out. Restart
+the T3 server after changing its startup environment; refreshing the UI is not enough.
+
 ```bash
 docker exec codex t3 --version
 docker exec -it codex t3 pair  # keep pairing details private

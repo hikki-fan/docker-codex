@@ -194,7 +194,9 @@ if [ "${T3CODE_ENABLED:-false}" = "true" ] && [ -x "${T3_BIN}" ]; then
     mkdir -p "${T3_HOME}" && touch "${T3_LOG}" && chmod 600 "${T3_LOG}" || exit 1
     if [ ! -f "${T3_PID}" ] || \
        ! pid_is_expected "$(cat "${T3_PID}" 2>/dev/null || true)" "t3 serve"; then
-      setsid "${T3_BIN}" serve --host "${T3_HOST}" --port "${T3_PORT}" --lan "${T3_WORKDIR}" \
+      # Enable Node's environment proxy support for provider HTTP requests.
+      # Scope this to T3 and preserve an explicit operator override.
+      NODE_USE_ENV_PROXY="${NODE_USE_ENV_PROXY:-1}" setsid "${T3_BIN}" serve --host "${T3_HOST}" --port "${T3_PORT}" --lan "${T3_WORKDIR}" \
         </dev/null >>"${T3_LOG}" 2>&1 &
       echo $! >"${T3_PID}"
       chmod 600 "${T3_PID}"
